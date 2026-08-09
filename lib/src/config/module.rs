@@ -245,6 +245,7 @@ impl Module {
             &ctor_range,
             exception_data,
             &arm9,
+            &main_func,
             dsprot_result.as_ref(),
         )?;
         find_function_labels(&module, symbol_map, options)?;
@@ -790,6 +791,7 @@ impl Module {
         ctor: &CtorRange,
         exception_data: Option<ExceptionData>,
         arm9: &Arm9,
+        main_func: &MainFunction,
         dsprot_result: Option<&DsProtDecryptResult>,
     ) -> Result<(), ModuleError> {
         let overriden_function_sizes =
@@ -883,12 +885,11 @@ impl Module {
         // All other functions, starting from main
         let exception_start = exception_data.as_ref().and_then(ExceptionData::exception_start);
         let text_max = exception_start.unwrap_or(read_only_end);
-        let main_start = self.find_build_info_end_address(arm9)?;
         let FoundFunctions { functions: text_functions, end: text_end, .. } = self
             .find_functions(
                 symbol_map,
                 FunctionSearchOptions {
-                    start_address: Some(main_start),
+                    start_address: Some(main_func.address),
                     end_address: Some(text_max),
                     // Skips over segments of strange EOR instructions which are never executed
                     max_function_start_search_distance: 0x2000,
@@ -975,16 +976,6 @@ impl Module {
         }
 
         Ok(())
-    }
-
-    fn find_build_info_end_address(&self, arm9: &Arm9) -> Result<u32, ModuleError> {
-        let end_address = if let Some(last_library) = arm9.libraries()?.last() {
-            (last_library.address() + last_library.version_string().len() as u32)
-                .next_multiple_of(4)
-        } else {
-            self.base_address + arm9.build_info_offset() + 0x24 // 0x24 is the size of the build info struct
-        };
-        Ok(end_address)
     }
 
     fn find_sections_itcm(&mut self, symbol_map: &mut SymbolMap) -> Result<(), ModuleError> {
