@@ -510,7 +510,7 @@ impl Module {
     fn find_functions(
         &mut self,
         symbol_map: &mut SymbolMap,
-        search_options: FunctionSearchOptions,
+        search_options: &FunctionSearchOptions,
         func_prefix: &str,
     ) -> Result<Option<FoundFunctions>, ModuleError> {
         let functions = Function::find_functions(FindFunctionsOptions {
@@ -622,13 +622,13 @@ impl Module {
         let FoundFunctions { functions: init_functions, start: init_start, end: init_end } = self
             .find_functions(
                 symbol_map,
-                FunctionSearchOptions {
+                &FunctionSearchOptions {
                     start_address: Some(functions_min),
                     last_function_address: Some(functions_max),
                     end_address: None,
                     max_function_start_search_distance: 0,
                     use_data_as_upper_bound: false,
-                    function_addresses: Some(init_functions.0),
+                    function_addresses: Some(&init_functions.0),
                     existing_functions: None,
                     check_defs_uses: true,
                     overriden_function_sizes: Some(overriden_function_sizes),
@@ -755,20 +755,23 @@ impl Module {
             ctor.start
         };
 
-        let rodata_start = if let Some(functions_result) = self.find_functions(
+        let rodata_start = if let Some(mut functions_result) = self.find_functions(
             symbol_map,
-            FunctionSearchOptions {
+            &FunctionSearchOptions {
                 end_address: Some(rodata_end),
                 use_data_as_upper_bound: true,
                 check_defs_uses: true,
                 overriden_function_sizes: Some(overriden_function_sizes),
                 dsprot_encrypted_functions: Some(dsprot_encrypted_functions),
                 dsprot_encrypted_ranges,
+                max_function_start_search_distance: 0x10,
                 ..Default::default()
             },
             &self.default_func_prefix.clone(),
         )? {
             let end = functions_result.end;
+            // Force to base address to avoid misaligned start address
+            functions_result.start = self.base_address;
             self.add_text_section(functions_result)?;
             end
         } else {
@@ -870,7 +873,7 @@ impl Module {
         let FoundFunctions { functions: entry_functions, .. } = self
             .find_functions(
                 symbol_map,
-                FunctionSearchOptions {
+                &FunctionSearchOptions {
                     start_address: Some(self.base_address + 0x800),
                     end_address: Some(build_info_address),
                     existing_functions: Some(&functions),
@@ -885,21 +888,28 @@ impl Module {
         // All other functions, starting from main
         let exception_start = exception_data.as_ref().and_then(ExceptionData::exception_start);
         let text_max = exception_start.unwrap_or(read_only_end);
+        let build_info_end = self.find_build_info_end_address(arm9)?;
+
+        let main_search_options = FunctionSearchOptions {
+            start_address: None,
+            end_address: None,
+            // Skips over segments of strange EOR instructions which are never executed
+            max_function_start_search_distance: 0x2000,
+            use_data_as_upper_bound: true,
+            // There are some handwritten assembly functions in ARM9 main that don't follow the procedure call standard
+            check_defs_uses: false,
+            overriden_function_sizes: Some(overriden_function_sizes),
+            dsprot_encrypted_functions: Some(dsprot_encrypted_functions),
+            dsprot_encrypted_ranges,
+            ..Default::default()
+        };
         let FoundFunctions { functions: text_functions, end: text_end, .. } = self
             .find_functions(
                 symbol_map,
-                FunctionSearchOptions {
+                &FunctionSearchOptions {
                     start_address: Some(main_func.address),
                     end_address: Some(text_max),
-                    // Skips over segments of strange EOR instructions which are never executed
-                    max_function_start_search_distance: 0x2000,
-                    use_data_as_upper_bound: true,
-                    // There are some handwritten assembly functions in ARM9 main that don't follow the procedure call standard
-                    check_defs_uses: false,
-                    overriden_function_sizes: Some(overriden_function_sizes),
-                    dsprot_encrypted_functions: Some(dsprot_encrypted_functions),
-                    dsprot_encrypted_ranges,
-                    ..Default::default()
+                    ..main_search_options
                 },
                 &self.default_func_prefix.clone(),
             )?
@@ -907,6 +917,22 @@ impl Module {
 
         let text_start = self.base_address;
         functions.extend(text_functions);
+
+        // Look for functions between the build info and the main function
+        if build_info_end < main_func.address
+            && let Some(pre_main) = self.find_functions(
+                symbol_map,
+                &FunctionSearchOptions {
+                    start_address: Some(build_info_end),
+                    end_address: Some(main_func.address),
+                    ..main_search_options
+                },
+                &self.default_func_prefix.clone(),
+            )?
+        {
+            functions.extend(pre_main.functions);
+        }
+
         self.add_text_section(FoundFunctions { functions, start: text_start, end: text_end })?;
 
         // Add .exception and .exceptix sections if they exist
@@ -978,11 +1004,21 @@ impl Module {
         Ok(())
     }
 
+    fn find_build_info_end_address(&self, arm9: &Arm9) -> Result<u32, ModuleError> {
+        let end_address = if let Some(last_library) = arm9.libraries()?.last() {
+            (last_library.address() + last_library.version_string().len() as u32)
+                .next_multiple_of(4)
+        } else {
+            self.base_address + arm9.build_info_offset() + 0x24 // 0x24 is the size of the build info struct
+        };
+        Ok(end_address)
+    }
+
     fn find_sections_itcm(&mut self, symbol_map: &mut SymbolMap) -> Result<(), ModuleError> {
         let mut text_functions = self
             .find_functions(
                 symbol_map,
-                FunctionSearchOptions {
+                &FunctionSearchOptions {
                     // ITCM only contains code, so there's no risk of running into non-code by skipping illegal instructions
                     max_function_start_search_distance: u32::MAX,
                     // There are some handwritten assembly functions in the ITCM that don't follow the procedure call standard
@@ -1027,7 +1063,7 @@ impl Module {
 
         let text_functions = self.find_functions(
             symbol_map,
-            FunctionSearchOptions {
+            &FunctionSearchOptions {
                 max_function_start_search_distance: 32,
                 use_data_as_upper_bound: true,
                 // There are some handwritten assembly functions in unknown autoloads that don't follow the procedure call standard

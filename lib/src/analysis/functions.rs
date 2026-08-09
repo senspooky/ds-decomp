@@ -695,7 +695,7 @@ pub struct FindFunctionsOptions<'a> {
     pub module_start_address: u32,
     pub module_end_address: u32,
 
-    pub search_options: FunctionSearchOptions<'a>,
+    pub search_options: &'a FunctionSearchOptions<'a>,
 }
 
 struct ParseFunctionContext<'a> {
@@ -1546,7 +1546,7 @@ pub struct FunctionSearchOptions<'a> {
     pub use_data_as_upper_bound: bool,
     /// Only functions starting at these addresses will be analyzed. Used for .init functions.
     /// Note: This will override `keep_searching_for_valid_function_start`, they are not intended to be used together.
-    pub function_addresses: Option<BTreeSet<u32>>,
+    pub function_addresses: Option<&'a BTreeSet<u32>>,
     /// If a branch instruction branches into one of these functions, it will be treated as a function branch instead of
     /// inserting a label at the branch destination.
     /// If the function branch is unconditional, it will also be treated as a tail call and terminate the analysis of the
