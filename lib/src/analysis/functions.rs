@@ -350,7 +350,9 @@ impl Function {
                 }) => {
                     match source {
                         ParseFunctionError::IllegalIns {
-                            address: illegal_address, ins, ..
+                            address: illegal_address,
+                            ins,
+                            reason,
                         } => {
                             let search_limit = prev_valid_address
                                 .saturating_add(search_options.max_function_start_search_distance);
@@ -365,14 +367,16 @@ impl Function {
                             } else {
                                 if thumb {
                                     log::debug!(
-                                        "Terminating function analysis due to illegal instruction at {:#010x}: {:04x}",
+                                        "Terminating function analysis due to illegal instruction at {:#010x}, {}: {:04x}",
                                         illegal_address,
+                                        reason,
                                         ins.code()
                                     );
                                 } else {
                                     log::debug!(
-                                        "Terminating function analysis due to illegal instruction at {:#010x}: {:08x}",
+                                        "Terminating function analysis due to illegal instruction at {:#010x}, {}: {:08x}",
                                         illegal_address,
+                                        reason,
                                         ins.code()
                                     );
                                 }
@@ -873,7 +877,11 @@ impl<'a> ParseFunctionContext<'a> {
                 4
             } else {
                 // Not combined
-                return ParseFunctionState::IllegalIns { address, ins };
+                return ParseFunctionState::IllegalIns {
+                    address,
+                    ins,
+                    reason: "Thumb BL/BLX not combined",
+                };
             }
         } else {
             // ARM instruction
@@ -881,8 +889,8 @@ impl<'a> ParseFunctionContext<'a> {
         };
 
         self.illegal_code_state = self.illegal_code_state.handle(ins, parsed_ins);
-        if self.illegal_code_state.is_illegal() {
-            return ParseFunctionState::IllegalIns { address, ins };
+        if let IllegalCodeState::Illegal { reason } = self.illegal_code_state {
+            return ParseFunctionState::IllegalIns { address, ins, reason };
         }
 
         if let Some(destination) = Function::is_branch(ins, parsed_ins, address) {
@@ -893,13 +901,21 @@ impl<'a> ParseFunctionContext<'a> {
                 let thumb = matches!(ins, Ins::Thumb(_));
                 if thumb != function.is_thumb() {
                     // Instruction mode must match
-                    return ParseFunctionState::IllegalIns { address, ins };
+                    return ParseFunctionState::IllegalIns {
+                        address,
+                        ins,
+                        reason: "branch into opposite instruction mode",
+                    };
                 }
             }
 
             if !(0x01ff8000..0x03000000).contains(&destination) {
                 // Branch goes outside of program
-                return ParseFunctionState::IllegalIns { address, ins };
+                return ParseFunctionState::IllegalIns {
+                    address,
+                    ins,
+                    reason: "branch outside of program",
+                };
             }
         }
 
@@ -1031,7 +1047,11 @@ impl<'a> ParseFunctionContext<'a> {
                     "Illegal instruction at {:#010x}: Pool load goes outside module",
                     address
                 );
-                return ParseFunctionState::IllegalIns { address, ins };
+                return ParseFunctionState::IllegalIns {
+                    address,
+                    ins,
+                    reason: "pool load goes outside module",
+                };
             };
             let const_value = u32::from_le_slice(bytes);
             self.register_values[register as usize] =
@@ -1110,7 +1130,11 @@ impl<'a> ParseFunctionContext<'a> {
                         _ => continue,
                     };
                     if !legal {
-                        return ParseFunctionState::IllegalIns { address, ins };
+                        return ParseFunctionState::IllegalIns {
+                            address,
+                            ins,
+                            reason: "used register with undefined value",
+                        };
                     }
                 }
                 if !is_return {
@@ -1217,8 +1241,8 @@ impl<'a> ParseFunctionContext<'a> {
             ParseFunctionState::Continue => {
                 return NotDoneSnafu.fail();
             }
-            ParseFunctionState::IllegalIns { address, ins } => {
-                return IllegalInsSnafu { address, ins }.fail()?;
+            ParseFunctionState::IllegalIns { address, ins, reason } => {
+                return IllegalInsSnafu { address, ins, reason }.fail()?;
             }
             ParseFunctionState::Done => {}
         };
@@ -1377,7 +1401,7 @@ pub struct ParseFunctionOptions {
 
 enum ParseFunctionState {
     Continue,
-    IllegalIns { address: u32, ins: Ins },
+    IllegalIns { address: u32, ins: Ins, reason: &'static str },
     Done,
 }
 
@@ -1392,8 +1416,8 @@ impl ParseFunctionState {
 
 #[derive(Debug, Snafu)]
 pub enum ParseFunctionError {
-    #[snafu(display("Illegal instruction at {address:#010x}: {ins:?}"))]
-    IllegalIns { address: u32, ins: Ins },
+    #[snafu(display("Illegal instruction at {address:#010x}, {reason}: {ins:?}"))]
+    IllegalIns { address: u32, ins: Ins, reason: &'static str },
     #[snafu(display("No epilogue found"))]
     NoEpilogue,
     #[snafu(display("Illegal function start at {address:#010x}: {ins}"))]
