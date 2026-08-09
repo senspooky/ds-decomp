@@ -1,5 +1,6 @@
 use std::{
     backtrace::Backtrace,
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     fmt::{Display, Formatter},
 };
@@ -324,11 +325,12 @@ impl Function {
             let overriden_size =
                 search_options.overriden_function_sizes.and_then(|sizes| sizes.get(&address));
 
+            let start_address = address;
             let function_result = Function::function_parser_loop(
                 parser,
                 FunctionParseOptions {
                     name,
-                    start_address: address,
+                    start_address,
                     base_address,
                     module_code,
                     known_end_address: None,
@@ -367,17 +369,19 @@ impl Function {
                             } else {
                                 if thumb {
                                     log::debug!(
-                                        "Terminating function analysis due to illegal instruction at {:#010x}, {}: {:04x}",
+                                        "Terminating function analysis due to illegal instruction at {:#010x} starting from {:#010x}: {:04x} ({})",
                                         illegal_address,
+                                        start_address,
+                                        ins.code(),
                                         reason,
-                                        ins.code()
                                     );
                                 } else {
                                     log::debug!(
-                                        "Terminating function analysis due to illegal instruction at {:#010x}, {}: {:08x}",
+                                        "Terminating function analysis due to illegal instruction at {:#010x} starting from {:#010x}: {:08x} ({})",
                                         illegal_address,
+                                        start_address,
+                                        ins.code(),
                                         reason,
-                                        ins.code()
                                     );
                                 }
                                 break;
@@ -880,7 +884,7 @@ impl<'a> ParseFunctionContext<'a> {
                 return ParseFunctionState::IllegalIns {
                     address,
                     ins,
-                    reason: "Thumb BL/BLX not combined",
+                    reason: "Thumb BL/BLX not combined".into(),
                 };
             }
         } else {
@@ -890,7 +894,7 @@ impl<'a> ParseFunctionContext<'a> {
 
         self.illegal_code_state = self.illegal_code_state.handle(ins, parsed_ins);
         if let IllegalCodeState::Illegal { reason } = self.illegal_code_state {
-            return ParseFunctionState::IllegalIns { address, ins, reason };
+            return ParseFunctionState::IllegalIns { address, ins, reason: reason.into() };
         }
 
         if let Some(destination) = Function::is_branch(ins, parsed_ins, address) {
@@ -904,7 +908,7 @@ impl<'a> ParseFunctionContext<'a> {
                     return ParseFunctionState::IllegalIns {
                         address,
                         ins,
-                        reason: "branch into opposite instruction mode",
+                        reason: "branch into opposite instruction mode".into(),
                     };
                 }
             }
@@ -914,7 +918,7 @@ impl<'a> ParseFunctionContext<'a> {
                 return ParseFunctionState::IllegalIns {
                     address,
                     ins,
-                    reason: "branch outside of program",
+                    reason: "branch outside of program".into(),
                 };
             }
         }
@@ -1050,7 +1054,7 @@ impl<'a> ParseFunctionContext<'a> {
                 return ParseFunctionState::IllegalIns {
                     address,
                     ins,
-                    reason: "pool load goes outside module",
+                    reason: "pool load goes outside module".into(),
                 };
             };
             let const_value = u32::from_le_slice(bytes);
@@ -1104,7 +1108,7 @@ impl<'a> ParseFunctionContext<'a> {
             };
             if let Some((defs, uses)) = defs_uses {
                 for usage in uses {
-                    let legal = match usage {
+                    let illegal_reg = match usage {
                         Argument::Reg(reg) => {
                             if let Ins::Arm(ins) = ins
                                 && ins.op == arm::Opcode::Str
@@ -1116,24 +1120,27 @@ impl<'a> ParseFunctionContext<'a> {
                                 continue;
                             }
 
-                            self.defined_registers.contains(&reg.reg)
+                            (!self.defined_registers.contains(&reg.reg)).then_some(reg.reg)
                         }
                         Argument::RegList(reg_list) => {
-                            reg_list.iter().all(|reg| self.defined_registers.contains(&reg))
+                            reg_list.iter().find(|reg| !self.defined_registers.contains(reg))
                         }
                         Argument::ShiftReg(shift_reg) => {
-                            self.defined_registers.contains(&shift_reg.reg)
+                            (!self.defined_registers.contains(&shift_reg.reg))
+                                .then_some(shift_reg.reg)
                         }
                         Argument::OffsetReg(offset_reg) => {
-                            self.defined_registers.contains(&offset_reg.reg)
+                            (!self.defined_registers.contains(&offset_reg.reg))
+                                .then_some(offset_reg.reg)
                         }
                         _ => continue,
                     };
-                    if !legal {
+                    if let Some(illegal_reg) = illegal_reg {
                         return ParseFunctionState::IllegalIns {
                             address,
                             ins,
-                            reason: "used register with undefined value",
+                            reason: format!("used {illegal_reg:?} when it has an undefined value")
+                                .into(),
                         };
                     }
                 }
@@ -1401,7 +1408,7 @@ pub struct ParseFunctionOptions {
 
 enum ParseFunctionState {
     Continue,
-    IllegalIns { address: u32, ins: Ins, reason: &'static str },
+    IllegalIns { address: u32, ins: Ins, reason: Cow<'static, str> },
     Done,
 }
 
@@ -1417,7 +1424,7 @@ impl ParseFunctionState {
 #[derive(Debug, Snafu)]
 pub enum ParseFunctionError {
     #[snafu(display("Illegal instruction at {address:#010x}, {reason}: {ins:?}"))]
-    IllegalIns { address: u32, ins: Ins, reason: &'static str },
+    IllegalIns { address: u32, ins: Ins, reason: Cow<'static, str> },
     #[snafu(display("No epilogue found"))]
     NoEpilogue,
     #[snafu(display("Illegal function start at {address:#010x}: {ins}"))]
