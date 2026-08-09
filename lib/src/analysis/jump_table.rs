@@ -16,7 +16,7 @@ pub struct JumpTable {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JumpTableKind {
     Arm,
-    Thumb(ThumbJumpTableKind),
+    Thumb { kind: ThumbJumpTableKind, jump: ThumbJumpTableJump },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -283,13 +283,24 @@ pub enum JumpTableStateThumb {
     BxJump { jump: Register, table_address: u32, limit: u32, kind: ThumbJumpTableKind },
 
     /// valid table detected, starts from `table_address` with a size of `limit`
-    ValidJumpTable { table_address: u32, limit: u32, kind: ThumbJumpTableKind },
+    ValidJumpTable {
+        table_address: u32,
+        limit: u32,
+        kind: ThumbJumpTableKind,
+        jump: ThumbJumpTableJump,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThumbJumpTableKind {
     Halfword,
     Byte,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThumbJumpTableJump {
+    AddPc,
+    Bx,
 }
 
 impl JumpTableStateThumb {
@@ -494,12 +505,13 @@ impl JumpTableStateThumb {
                         Argument::None,
                     ) if reg == jump => {
                         let size = (limit + 1) * kind.item_size();
+                        let jump = ThumbJumpTableJump::AddPc;
                         jump_tables.insert(table_address, JumpTable {
                             address: table_address,
                             size,
-                            kind: JumpTableKind::Thumb(kind),
+                            kind: JumpTableKind::Thumb { kind, jump },
                         });
-                        Self::ValidJumpTable { table_address, limit, kind }
+                        Self::ValidJumpTable { table_address, limit, kind, jump }
                     }
                     (
                         "add",
@@ -515,17 +527,18 @@ impl JumpTableStateThumb {
                     ("bx", Argument::Reg(Reg { reg, .. }), Argument::None) if reg == jump => {
                         let table_address = table_address - 2;
                         let size = (limit + 1) * kind.item_size();
+                        let jump = ThumbJumpTableJump::Bx;
                         jump_tables.insert(table_address, JumpTable {
                             address: table_address,
                             size,
-                            kind: JumpTableKind::Thumb(kind),
+                            kind: JumpTableKind::Thumb { kind, jump },
                         });
-                        Self::ValidJumpTable { table_address, limit, kind }
+                        Self::ValidJumpTable { table_address, limit, kind, jump }
                     }
                     _ => Self::default(),
                 }
             }
-            Self::ValidJumpTable { table_address, limit, kind } => {
+            Self::ValidJumpTable { table_address, limit, kind, jump: _ } => {
                 let end = table_address + (limit + 1) * kind.item_size();
                 if address >= end { Self::default() } else { self }
             }
@@ -534,7 +547,7 @@ impl JumpTableStateThumb {
 
     pub fn table_end_address(&self) -> Option<u32> {
         match self {
-            Self::ValidJumpTable { table_address, limit, kind } => {
+            Self::ValidJumpTable { table_address, limit, kind, jump: _ } => {
                 Some(table_address + (limit + 1) * kind.item_size())
             }
             _ => None,
@@ -543,23 +556,28 @@ impl JumpTableStateThumb {
 
     pub fn get_labels(&self, address: u32, ins: Ins) -> Option<(u32, Option<u32>)> {
         match self {
-            Self::ValidJumpTable { table_address, limit, kind } => {
+            Self::ValidJumpTable { table_address, limit, kind, jump } => {
                 let end = table_address + limit * kind.item_size();
                 if address < *table_address || address > end {
                     None
                 } else {
-                    let code = ins.code() as i16;
+                    let pc_offset = match jump {
+                        ThumbJumpTableJump::AddPc => 2,
+                        ThumbJumpTableJump::Bx => 0,
+                    };
+                    let label_base = (table_address + pc_offset) as i32;
+                    let jump_offset = ins.code() as i16;
                     match kind {
                         ThumbJumpTableKind::Halfword => {
-                            Some(((*table_address as i32 + code as i32 + 2) as u32, None))
+                            Some(((label_base + jump_offset as i32) as u32 & !1, None))
                         }
                         ThumbJumpTableKind::Byte => {
-                            let [first_value, second_value] = code.to_le_bytes();
-                            let first_value = first_value as i8 as i32;
-                            let second_value = second_value as i8 as i32;
+                            let [first_offset, second_offset] = jump_offset.to_le_bytes();
+                            let first_value = first_offset as i8 as i32;
+                            let second_value = second_offset as i8 as i32;
                             Some((
-                                (*table_address as i32 + first_value + 2) as u32,
-                                Some((*table_address as i32 + second_value + 2) as u32),
+                                (label_base + first_value) as u32 & !1,
+                                Some((label_base + second_value) as u32 & !1),
                             ))
                         }
                     }

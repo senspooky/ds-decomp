@@ -962,7 +962,7 @@ impl<'a> ParseFunctionContext<'a> {
 
         let in_conditional_block =
             if let Some(last_conditional_destination) = self.last_conditional_destination {
-                address < (last_conditional_destination & !1)
+                address < last_conditional_destination
             } else {
                 false
             };
@@ -1227,7 +1227,7 @@ impl<'a> ParseFunctionContext<'a> {
                         after_pools
                     );
                 }
-                after_pools & !1
+                after_pools
             } else if !branch_backwards {
                 // Backwards branch with no further branch labels. This type of function contains some kind of infinite loop,
                 // hence the lack of return instruction as the final instruction.
