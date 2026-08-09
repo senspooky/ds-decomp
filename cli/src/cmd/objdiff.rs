@@ -29,6 +29,10 @@ pub struct Objdiff {
     #[arg(long, short = 'o')]
     output_path: Option<PathBuf>,
 
+    /// Print objdiff.json to stdout instead of writing a file.
+    #[arg(long)]
+    stdout: bool,
+
     /// Includes decomp.me scratches.
     #[arg(long, short = 's')]
     scratch: bool,
@@ -162,14 +166,18 @@ impl Objdiff {
             ..Default::default()
         };
 
-        create_dir_all(&output_path)?;
-        objdiff_core::config::save_project_config(
-            &project_config,
-            &objdiff_core::config::ProjectConfigInfo {
-                path: output_path.join("objdiff.json"),
-                timestamp: None,
-            },
-        )?;
+        if self.stdout {
+            serde_json::to_writer_pretty(std::io::stdout().lock(), &project_config)?;
+        } else {
+            create_dir_all(&output_path)?;
+            objdiff_core::config::save_project_config(
+                &project_config,
+                &objdiff_core::config::ProjectConfigInfo {
+                    path: output_path.join("objdiff.json"),
+                    timestamp: None,
+                },
+            )?;
+        }
 
         Ok(())
     }
