@@ -356,7 +356,7 @@ impl JumpTableStateThumb {
                         Argument::Reg(Reg { reg, .. }),
                         Argument::UImm(base),
                         Argument::None,
-                    ) if reg == index => Self::BranchNegative { index, limit: limit - base },
+                    ) if reg == index => Self::SignedBaseline { index, limit: limit - base },
                     _ => Self::default(),
                 }
             }
