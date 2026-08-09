@@ -5,6 +5,7 @@ use unarm::{
 };
 
 use super::functions::JumpTables;
+use crate::analysis::functions::RegValueSrc;
 
 #[derive(Debug, Clone)]
 pub struct JumpTable {
@@ -32,10 +33,13 @@ impl JumpTableState {
         ins: Ins,
         parsed_ins: &ParsedIns,
         jump_tables: &mut JumpTables,
+        register_values: &[Option<(u32, RegValueSrc)>; 16],
     ) -> Self {
         match self {
             Self::Arm(state) => Self::Arm(state.handle(address, ins, parsed_ins, jump_tables)),
-            Self::Thumb(state) => Self::Thumb(state.handle(address, ins, parsed_ins, jump_tables)),
+            Self::Thumb(state) => {
+                Self::Thumb(state.handle(address, ins, parsed_ins, jump_tables, register_values))
+            }
         }
     }
 
@@ -233,6 +237,7 @@ impl JumpTableStateArm {
 #[derive(Clone, Copy, Default, Debug)]
 pub enum JumpTableStateThumb {
     /// `cmp index, #size`              where `index` is the jump index and `size` is the size of the jump table
+    /// `cmp index, size`               when the table size is loaded from a pool constant
     #[default]
     CmpReg,
 
@@ -245,6 +250,7 @@ pub enum JumpTableStateThumb {
     /// if [`JumpTableStateThumb::BranchCond`] was bls:
     /// or [`JumpTableStateThumb::BranchNegative`] was bge:
     /// `b @skip`                       skip jump table
+    /// `bl @skip`                      skip jump table using long branch
     Branch { index: Register, limit: u32 },
 
     /// if [`JumpTableStateThumb::BranchCond`] was bgt:
@@ -304,7 +310,11 @@ pub enum ThumbJumpTableJump {
 }
 
 impl JumpTableStateThumb {
-    fn check_start(self, parsed_ins: &ParsedIns) -> Option<Self> {
+    fn check_start(
+        self,
+        parsed_ins: &ParsedIns,
+        register_values: &[Option<(u32, RegValueSrc)>; 16],
+    ) -> Option<Self> {
         let args = &parsed_ins.args;
         match (parsed_ins.mnemonic, args[0], args[1], args[2]) {
             (
@@ -313,6 +323,16 @@ impl JumpTableStateThumb {
                 Argument::UImm(limit),
                 Argument::None,
             ) if limit > 0 => Some(Self::BranchCond { index, limit }),
+            (
+                "cmp",
+                Argument::Reg(Reg { reg: index, .. }),
+                Argument::Reg(Reg { reg: limit_reg, .. }),
+                Argument::None,
+            ) => {
+                // If the jump table is large enough, the limit gets loaded from a pool constant
+                let (limit, _) = register_values[limit_reg as usize]?;
+                (limit > 0).then_some(Self::BranchCond { index, limit })
+            }
             _ => None,
         }
     }
@@ -323,11 +343,12 @@ impl JumpTableStateThumb {
         ins: Ins,
         parsed_ins: &ParsedIns,
         jump_tables: &mut JumpTables,
+        register_values: &[Option<(u32, RegValueSrc)>; 16],
     ) -> Self {
         if let Some(end_address) = self.table_end_address()
             && address < end_address
         {
-        } else if let Some(start) = self.check_start(parsed_ins) {
+        } else if let Some(start) = self.check_start(parsed_ins, register_values) {
             return start;
         }
 
@@ -347,6 +368,8 @@ impl JumpTableStateThumb {
             },
             Self::Branch { index, limit } => match (parsed_ins.mnemonic, args[0], args[1]) {
                 ("b", Argument::BranchDest(_), Argument::None) => Self::AddRegReg { index, limit },
+                // Long branch when `b` is out of range
+                ("bl", Argument::BranchDest(_), Argument::None) => Self::AddRegReg { index, limit },
                 _ => Self::default(),
             },
             Self::SignedBaseline { index, limit } => {

@@ -744,7 +744,7 @@ struct ParseFunctionContext<'a> {
 }
 
 #[derive(Clone, Copy)]
-enum RegValueSrc {
+pub enum RegValueSrc {
     PoolConstant(u32),
 }
 
@@ -850,8 +850,13 @@ impl<'a> ParseFunctionContext<'a> {
             return ParseFunctionState::Continue;
         }
 
-        self.jump_table_state =
-            self.jump_table_state.handle(address, ins, parsed_ins, &mut self.jump_tables);
+        self.jump_table_state = self.jump_table_state.handle(
+            address,
+            ins,
+            parsed_ins,
+            &mut self.jump_tables,
+            &self.register_values,
+        );
         if let Some(table_end_address) = self.jump_table_state.table_end_address() {
             self.last_conditional_destination =
                 self.last_conditional_destination.max(Some(table_end_address));
