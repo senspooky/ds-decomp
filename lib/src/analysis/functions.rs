@@ -974,22 +974,29 @@ impl<'a> ParseFunctionContext<'a> {
         let is_return = self.is_return(ins, parsed_ins, self.prev_parsed_ins.as_ref());
         if !in_conditional_block && is_return {
             let end_address = address + ins_size;
-            if let Some(destination) = Function::is_branch(ins, parsed_ins, address) {
-                let outside_function =
-                    destination < self.start_address || destination >= end_address;
-                if outside_function {
-                    // Tail call
-                    self.function_calls.insert(address, CalledFunction {
-                        ins,
-                        address: destination,
-                        thumb: self.thumb,
-                    });
+            if self.is_long_branch_destination(end_address) {
+                // The next instruction is the destination of a long branch, so this is not the
+                // final return instruction after all
+                self.last_conditional_destination =
+                    self.last_conditional_destination.max(Some(end_address));
+            } else {
+                if let Some(destination) = Function::is_branch(ins, parsed_ins, address) {
+                    let outside_function =
+                        destination < self.start_address || destination >= end_address;
+                    if outside_function {
+                        // Tail call
+                        self.function_calls.insert(address, CalledFunction {
+                            ins,
+                            address: destination,
+                            thumb: self.thumb,
+                        });
+                    }
                 }
-            }
 
-            // We're not inside a conditional code block, so this is the final return instruction
-            self.end_address = Some(address + ins_size);
-            return ParseFunctionState::Done;
+                // We're not inside a conditional code block, so this is the final return instruction
+                self.end_address = Some(end_address);
+                return ParseFunctionState::Done;
+            }
         }
 
         if address > self.start_address
@@ -1261,6 +1268,32 @@ impl<'a> ParseFunctionContext<'a> {
         }
 
         None
+    }
+
+    fn is_long_branch_destination(&self, address: u32) -> bool {
+        self.last_pool_address.is_some_and(|last_pool_address| address < last_pool_address)
+            && self.function_calls.values().any(|called| called.address == address)
+            && !self.is_entry_instruction_at(address)
+    }
+
+    fn is_entry_instruction_at(&self, address: u32) -> bool {
+        let Some(offset) = address.checked_sub(self.base_address) else {
+            return false;
+        };
+        let Some(code) = self.code.get(offset as usize..) else {
+            return false;
+        };
+        let mut parser = Parser::new(
+            if self.thumb { ParseMode::Thumb } else { ParseMode::Arm },
+            address,
+            Endian::Little,
+            PARSE_FLAGS,
+            code,
+        );
+        let Some((_, ins, parsed_ins)) = parser.next() else {
+            return false;
+        };
+        Function::is_entry_instruction(ins, &parsed_ins)
     }
 
     fn into_function(self, state: ParseFunctionState) -> Result<Function, IntoFunctionError> {
