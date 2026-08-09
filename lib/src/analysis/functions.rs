@@ -960,7 +960,12 @@ impl<'a> ParseFunctionContext<'a> {
             }
         }
 
-        let in_conditional_block = Some(address) < self.last_conditional_destination;
+        let in_conditional_block =
+            if let Some(last_conditional_destination) = self.last_conditional_destination {
+                address < (last_conditional_destination & !1)
+            } else {
+                false
+            };
         let is_return = self.is_return(ins, parsed_ins, self.prev_parsed_ins.as_ref());
         if !in_conditional_block && is_return {
             let end_address = address + ins_size;
@@ -1212,7 +1217,9 @@ impl<'a> ParseFunctionContext<'a> {
             // Sometimes, the pre-pool branch is conveniently placed at an actual branch in the code, and
             // leads even further than the end of the pool constants. In that case we should already have found
             // a label at a lower address.
-            if let Some(after_pools) = self.labels.range(address + 1..).next().copied() {
+            let after_pools = if let Some(after_pools) =
+                self.labels.range(parser.address..).next().copied()
+            {
                 if after_pools > address + 0x1000 {
                     log::warn!(
                         "Massive gap from constant pool at {:#x} to next label at {:#x}",
@@ -1220,7 +1227,7 @@ impl<'a> ParseFunctionContext<'a> {
                         after_pools
                     );
                 }
-                parser.seek_forward(after_pools);
+                after_pools & !1
             } else if !branch_backwards {
                 // Backwards branch with no further branch labels. This type of function contains some kind of infinite loop,
                 // hence the lack of return instruction as the final instruction.
@@ -1236,8 +1243,16 @@ impl<'a> ParseFunctionContext<'a> {
                     next_address,
                     after_pools
                 );
-                parser.seek_forward(after_pools);
-            }
+                after_pools
+            };
+            assert!(
+                after_pools >= parser.address,
+                "In function at {:#010x}: tried to jump forwards from {:#010x} past constant pool but went backwards to {:#010x}",
+                self.start_address,
+                address,
+                after_pools,
+            );
+            parser.seek_forward(after_pools);
         }
 
         None
