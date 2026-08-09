@@ -1,5 +1,6 @@
 use std::{
     backtrace::Backtrace,
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     fmt::{Display, Formatter},
 };
@@ -324,11 +325,12 @@ impl Function {
             let overriden_size =
                 search_options.overriden_function_sizes.and_then(|sizes| sizes.get(&address));
 
+            let start_address = address;
             let function_result = Function::function_parser_loop(
                 parser,
                 FunctionParseOptions {
                     name,
-                    start_address: address,
+                    start_address,
                     base_address,
                     module_code,
                     known_end_address: None,
@@ -350,7 +352,9 @@ impl Function {
                 }) => {
                     match source {
                         ParseFunctionError::IllegalIns {
-                            address: illegal_address, ins, ..
+                            address: illegal_address,
+                            ins,
+                            reason,
                         } => {
                             let search_limit = prev_valid_address
                                 .saturating_add(search_options.max_function_start_search_distance);
@@ -365,15 +369,19 @@ impl Function {
                             } else {
                                 if thumb {
                                     log::debug!(
-                                        "Terminating function analysis due to illegal instruction at {:#010x}: {:04x}",
+                                        "Terminating function analysis due to illegal instruction at {:#010x} starting from {:#010x}: {:04x} ({})",
                                         illegal_address,
-                                        ins.code()
+                                        start_address,
+                                        ins.code(),
+                                        reason,
                                     );
                                 } else {
                                     log::debug!(
-                                        "Terminating function analysis due to illegal instruction at {:#010x}: {:08x}",
+                                        "Terminating function analysis due to illegal instruction at {:#010x} starting from {:#010x}: {:08x} ({})",
                                         illegal_address,
-                                        ins.code()
+                                        start_address,
+                                        ins.code(),
+                                        reason,
                                     );
                                 }
                                 break;
@@ -687,7 +695,7 @@ pub struct FindFunctionsOptions<'a> {
     pub module_start_address: u32,
     pub module_end_address: u32,
 
-    pub search_options: FunctionSearchOptions<'a>,
+    pub search_options: &'a FunctionSearchOptions<'a>,
 }
 
 struct ParseFunctionContext<'a> {
@@ -736,7 +744,7 @@ struct ParseFunctionContext<'a> {
 }
 
 #[derive(Clone, Copy)]
-enum RegValueSrc {
+pub enum RegValueSrc {
     PoolConstant(u32),
 }
 
@@ -842,8 +850,13 @@ impl<'a> ParseFunctionContext<'a> {
             return ParseFunctionState::Continue;
         }
 
-        self.jump_table_state =
-            self.jump_table_state.handle(address, ins, parsed_ins, &mut self.jump_tables);
+        self.jump_table_state = self.jump_table_state.handle(
+            address,
+            ins,
+            parsed_ins,
+            &mut self.jump_tables,
+            &self.register_values,
+        );
         if let Some(table_end_address) = self.jump_table_state.table_end_address() {
             self.last_conditional_destination =
                 self.last_conditional_destination.max(Some(table_end_address));
@@ -873,7 +886,11 @@ impl<'a> ParseFunctionContext<'a> {
                 4
             } else {
                 // Not combined
-                return ParseFunctionState::IllegalIns { address, ins };
+                return ParseFunctionState::IllegalIns {
+                    address,
+                    ins,
+                    reason: "Thumb BL/BLX not combined".into(),
+                };
             }
         } else {
             // ARM instruction
@@ -881,8 +898,8 @@ impl<'a> ParseFunctionContext<'a> {
         };
 
         self.illegal_code_state = self.illegal_code_state.handle(ins, parsed_ins);
-        if self.illegal_code_state.is_illegal() {
-            return ParseFunctionState::IllegalIns { address, ins };
+        if let IllegalCodeState::Illegal { reason } = self.illegal_code_state {
+            return ParseFunctionState::IllegalIns { address, ins, reason: reason.into() };
         }
 
         if let Some(destination) = Function::is_branch(ins, parsed_ins, address) {
@@ -893,13 +910,21 @@ impl<'a> ParseFunctionContext<'a> {
                 let thumb = matches!(ins, Ins::Thumb(_));
                 if thumb != function.is_thumb() {
                     // Instruction mode must match
-                    return ParseFunctionState::IllegalIns { address, ins };
+                    return ParseFunctionState::IllegalIns {
+                        address,
+                        ins,
+                        reason: "branch into opposite instruction mode".into(),
+                    };
                 }
             }
 
             if !(0x01ff8000..0x03000000).contains(&destination) {
                 // Branch goes outside of program
-                return ParseFunctionState::IllegalIns { address, ins };
+                return ParseFunctionState::IllegalIns {
+                    address,
+                    ins,
+                    reason: "branch outside of program".into(),
+                };
             }
         }
 
@@ -940,26 +965,38 @@ impl<'a> ParseFunctionContext<'a> {
             }
         }
 
-        let in_conditional_block = Some(address) < self.last_conditional_destination;
+        let in_conditional_block =
+            if let Some(last_conditional_destination) = self.last_conditional_destination {
+                address < last_conditional_destination
+            } else {
+                false
+            };
         let is_return = self.is_return(ins, parsed_ins, self.prev_parsed_ins.as_ref());
         if !in_conditional_block && is_return {
             let end_address = address + ins_size;
-            if let Some(destination) = Function::is_branch(ins, parsed_ins, address) {
-                let outside_function =
-                    destination < self.start_address || destination >= end_address;
-                if outside_function {
-                    // Tail call
-                    self.function_calls.insert(address, CalledFunction {
-                        ins,
-                        address: destination,
-                        thumb: self.thumb,
-                    });
+            if self.is_long_branch_destination(end_address) {
+                // The next instruction is the destination of a long branch, so this is not the
+                // final return instruction after all
+                self.last_conditional_destination =
+                    self.last_conditional_destination.max(Some(end_address));
+            } else {
+                if let Some(destination) = Function::is_branch(ins, parsed_ins, address) {
+                    let outside_function =
+                        destination < self.start_address || destination >= end_address;
+                    if outside_function {
+                        // Tail call
+                        self.function_calls.insert(address, CalledFunction {
+                            ins,
+                            address: destination,
+                            thumb: self.thumb,
+                        });
+                    }
                 }
-            }
 
-            // We're not inside a conditional code block, so this is the final return instruction
-            self.end_address = Some(address + ins_size);
-            return ParseFunctionState::Done;
+                // We're not inside a conditional code block, so this is the final return instruction
+                self.end_address = Some(end_address);
+                return ParseFunctionState::Done;
+            }
         }
 
         if address > self.start_address
@@ -1031,7 +1068,11 @@ impl<'a> ParseFunctionContext<'a> {
                     "Illegal instruction at {:#010x}: Pool load goes outside module",
                     address
                 );
-                return ParseFunctionState::IllegalIns { address, ins };
+                return ParseFunctionState::IllegalIns {
+                    address,
+                    ins,
+                    reason: "pool load goes outside module".into(),
+                };
             };
             let const_value = u32::from_le_slice(bytes);
             self.register_values[register as usize] =
@@ -1084,7 +1125,7 @@ impl<'a> ParseFunctionContext<'a> {
             };
             if let Some((defs, uses)) = defs_uses {
                 for usage in uses {
-                    let legal = match usage {
+                    let illegal_reg = match usage {
                         Argument::Reg(reg) => {
                             if let Ins::Arm(ins) = ins
                                 && ins.op == arm::Opcode::Str
@@ -1096,21 +1137,28 @@ impl<'a> ParseFunctionContext<'a> {
                                 continue;
                             }
 
-                            self.defined_registers.contains(&reg.reg)
+                            (!self.defined_registers.contains(&reg.reg)).then_some(reg.reg)
                         }
                         Argument::RegList(reg_list) => {
-                            reg_list.iter().all(|reg| self.defined_registers.contains(&reg))
+                            reg_list.iter().find(|reg| !self.defined_registers.contains(reg))
                         }
                         Argument::ShiftReg(shift_reg) => {
-                            self.defined_registers.contains(&shift_reg.reg)
+                            (!self.defined_registers.contains(&shift_reg.reg))
+                                .then_some(shift_reg.reg)
                         }
                         Argument::OffsetReg(offset_reg) => {
-                            self.defined_registers.contains(&offset_reg.reg)
+                            (!self.defined_registers.contains(&offset_reg.reg))
+                                .then_some(offset_reg.reg)
                         }
                         _ => continue,
                     };
-                    if !legal {
-                        return ParseFunctionState::IllegalIns { address, ins };
+                    if let Some(illegal_reg) = illegal_reg {
+                        return ParseFunctionState::IllegalIns {
+                            address,
+                            ins,
+                            reason: format!("used {illegal_reg:?} when it has an undefined value")
+                                .into(),
+                        };
                     }
                 }
                 if !is_return {
@@ -1181,7 +1229,9 @@ impl<'a> ParseFunctionContext<'a> {
             // Sometimes, the pre-pool branch is conveniently placed at an actual branch in the code, and
             // leads even further than the end of the pool constants. In that case we should already have found
             // a label at a lower address.
-            if let Some(after_pools) = self.labels.range(address + 1..).next().copied() {
+            let after_pools = if let Some(after_pools) =
+                self.labels.range(parser.address..).next().copied()
+            {
                 if after_pools > address + 0x1000 {
                     log::warn!(
                         "Massive gap from constant pool at {:#x} to next label at {:#x}",
@@ -1189,7 +1239,7 @@ impl<'a> ParseFunctionContext<'a> {
                         after_pools
                     );
                 }
-                parser.seek_forward(after_pools);
+                after_pools
             } else if !branch_backwards {
                 // Backwards branch with no further branch labels. This type of function contains some kind of infinite loop,
                 // hence the lack of return instruction as the final instruction.
@@ -1205,11 +1255,45 @@ impl<'a> ParseFunctionContext<'a> {
                     next_address,
                     after_pools
                 );
-                parser.seek_forward(after_pools);
-            }
+                after_pools
+            };
+            assert!(
+                after_pools >= parser.address,
+                "In function at {:#010x}: tried to jump forwards from {:#010x} past constant pool but went backwards to {:#010x}",
+                self.start_address,
+                address,
+                after_pools,
+            );
+            parser.seek_forward(after_pools);
         }
 
         None
+    }
+
+    fn is_long_branch_destination(&self, address: u32) -> bool {
+        self.last_pool_address.is_some_and(|last_pool_address| address < last_pool_address)
+            && self.function_calls.values().any(|called| called.address == address)
+            && !self.is_entry_instruction_at(address)
+    }
+
+    fn is_entry_instruction_at(&self, address: u32) -> bool {
+        let Some(offset) = address.checked_sub(self.base_address) else {
+            return false;
+        };
+        let Some(code) = self.code.get(offset as usize..) else {
+            return false;
+        };
+        let mut parser = Parser::new(
+            if self.thumb { ParseMode::Thumb } else { ParseMode::Arm },
+            address,
+            Endian::Little,
+            PARSE_FLAGS,
+            code,
+        );
+        let Some((_, ins, parsed_ins)) = parser.next() else {
+            return false;
+        };
+        Function::is_entry_instruction(ins, &parsed_ins)
     }
 
     fn into_function(self, state: ParseFunctionState) -> Result<Function, IntoFunctionError> {
@@ -1217,8 +1301,8 @@ impl<'a> ParseFunctionContext<'a> {
             ParseFunctionState::Continue => {
                 return NotDoneSnafu.fail();
             }
-            ParseFunctionState::IllegalIns { address, ins } => {
-                return IllegalInsSnafu { address, ins }.fail()?;
+            ParseFunctionState::IllegalIns { address, ins, reason } => {
+                return IllegalInsSnafu { address, ins, reason }.fail()?;
             }
             ParseFunctionState::Done => {}
         };
@@ -1377,7 +1461,7 @@ pub struct ParseFunctionOptions {
 
 enum ParseFunctionState {
     Continue,
-    IllegalIns { address: u32, ins: Ins },
+    IllegalIns { address: u32, ins: Ins, reason: Cow<'static, str> },
     Done,
 }
 
@@ -1392,8 +1476,8 @@ impl ParseFunctionState {
 
 #[derive(Debug, Snafu)]
 pub enum ParseFunctionError {
-    #[snafu(display("Illegal instruction at {address:#010x}: {ins:?}"))]
-    IllegalIns { address: u32, ins: Ins },
+    #[snafu(display("Illegal instruction at {address:#010x}, {reason}: {ins:?}"))]
+    IllegalIns { address: u32, ins: Ins, reason: Cow<'static, str> },
     #[snafu(display("No epilogue found"))]
     NoEpilogue,
     #[snafu(display("Illegal function start at {address:#010x}: {ins}"))]
@@ -1462,7 +1546,7 @@ pub struct FunctionSearchOptions<'a> {
     pub use_data_as_upper_bound: bool,
     /// Only functions starting at these addresses will be analyzed. Used for .init functions.
     /// Note: This will override `keep_searching_for_valid_function_start`, they are not intended to be used together.
-    pub function_addresses: Option<BTreeSet<u32>>,
+    pub function_addresses: Option<&'a BTreeSet<u32>>,
     /// If a branch instruction branches into one of these functions, it will be treated as a function branch instead of
     /// inserting a label at the branch destination.
     /// If the function branch is unconditional, it will also be treated as a tail call and terminate the analysis of the

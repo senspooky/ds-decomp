@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 use ds_decomp::{
     analysis::{
         functions::Function,
-        jump_table::{JumpTableKind, ThumbJumpTableKind},
+        jump_table::{JumpTableKind, ThumbJumpTableJump, ThumbJumpTableKind},
     },
     config::symbol::SymJumpTable,
 };
@@ -94,38 +94,42 @@ impl FunctionExt for Function {
 
             // write instruction
             match jump_table {
-                Some((SymJumpTable { kind: JumpTableKind::Thumb(kind), .. }, sym)) => match kind {
-                    ThumbJumpTableKind::Halfword => {
-                        let value = i32::from(ins.code() as i16);
-                        write_numerical_jump_table_entry(
-                            w, symbols, sym, value, ".short", address,
-                        )?;
+                Some((SymJumpTable { kind: JumpTableKind::Thumb { kind, jump }, .. }, sym)) => {
+                    match kind {
+                        ThumbJumpTableKind::Halfword => {
+                            let value = i32::from(ins.code() as i16);
+                            write_numerical_jump_table_entry(
+                                w, symbols, sym, value, ".short", address, jump,
+                            )?;
+                        }
+                        ThumbJumpTableKind::Byte => {
+                            let code = ins.code() as i16;
+                            let [first_value, second_value] = code.to_le_bytes();
+                            let first_value = first_value as i8 as i32;
+                            let second_value = second_value as i8 as i32;
+                            write_numerical_jump_table_entry(
+                                w,
+                                symbols,
+                                sym,
+                                first_value,
+                                ".byte",
+                                address,
+                                jump,
+                            )?;
+                            write_jump_table_case(w, jump_table, 1, address)?;
+                            write_numerical_jump_table_entry(
+                                w,
+                                symbols,
+                                sym,
+                                second_value,
+                                ".byte",
+                                address + 1,
+                                jump,
+                            )?;
+                            write_jump_table_case(w, jump_table, 1, address + 1)?;
+                        }
                     }
-                    ThumbJumpTableKind::Byte => {
-                        let code = ins.code() as i16;
-                        let [first_value, second_value] = code.to_le_bytes();
-                        let first_value = first_value as i8 as i32;
-                        let second_value = second_value as i8 as i32;
-                        write_numerical_jump_table_entry(
-                            w,
-                            symbols,
-                            sym,
-                            first_value,
-                            ".byte",
-                            address,
-                        )?;
-                        write_jump_table_case(w, jump_table, 1, address)?;
-                        write_numerical_jump_table_entry(
-                            w,
-                            symbols,
-                            sym,
-                            second_value,
-                            ".byte",
-                            address + 1,
-                        )?;
-                        write_jump_table_case(w, jump_table, 1, address + 1)?;
-                    }
-                },
+                }
                 _ => {
                     if parser.mode != ParseMode::Data {
                         write!(w, "    ")?;
@@ -234,8 +238,13 @@ fn write_numerical_jump_table_entry<W: io::Write>(
     value: i32,
     directive: &str,
     address: u32,
+    jump: ThumbJumpTableJump,
 ) -> Result<(), anyhow::Error> {
-    let label_address = (sym.addr.cast_signed() + value + 2).cast_unsigned();
+    let pc_offset = match jump {
+        ThumbJumpTableJump::AddPc => 2,
+        ThumbJumpTableJump::Bx => 0,
+    };
+    let label_address = (sym.addr.cast_signed() + value + pc_offset).cast_unsigned() & !1;
     let Some(label) = symbols.symbol_map.get_label(label_address)? else {
         log::error!(
             "Expected label for jump table destination from {address:#010x} to {label_address:#010x}"
@@ -244,6 +253,9 @@ fn write_numerical_jump_table_entry<W: io::Write>(
             "Expected label for jump table destination from {address:#010x} to {label_address:#010x}"
         );
     };
-    write!(w, "    {} {} - {} - 2", directive, label.name, sym.name)?;
+    write!(w, "    {} {} - {} {}", directive, label.name, sym.name, match jump {
+        ThumbJumpTableJump::AddPc => "- 2",
+        ThumbJumpTableJump::Bx => "+ 1",
+    },)?;
     Ok(())
 }

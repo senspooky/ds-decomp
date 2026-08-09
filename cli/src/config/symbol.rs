@@ -132,7 +132,7 @@ impl SymbolExt for Symbol {
             SymbolKind::PoolConstant => Some("$d"),
             SymbolKind::JumpTable(jump_table) => match jump_table.kind {
                 JumpTableKind::Arm => Some("$a"),
-                JumpTableKind::Thumb(_) => Some("$d"),
+                JumpTableKind::Thumb { .. } => Some("$d"),
             },
             SymbolKind::Data(_) => Some("$d"),
             SymbolKind::Bss(_) => None,

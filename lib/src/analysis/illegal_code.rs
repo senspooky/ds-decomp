@@ -11,13 +11,15 @@ pub enum IllegalCodeState {
     ShiftedRegisterValue {
         reg: Register,
     },
-    Illegal,
+    Illegal {
+        reason: &'static str,
+    },
 }
 
 impl IllegalCodeState {
     pub fn handle(self, ins: Ins, parsed_ins: &ParsedIns) -> Self {
         if ins.is_illegal() || parsed_ins.is_illegal() {
-            return Self::Illegal;
+            return Self::Illegal { reason: "illegal opcode" };
         }
 
         if matches!(ins, Ins::Thumb(_))
@@ -27,7 +29,7 @@ impl IllegalCodeState {
             && let Arg::UImm(0) = parsed_ins.args[2]
         {
             // In Thumb with divided syntax, 0000 disassembles into lsl r0, r0, #0x0 and is a no-op
-            return Self::Illegal;
+            return Self::Illegal { reason: "Thumb no-op 'lsl r0, r0, #0' or 0000 in hex" };
         }
 
         let args = &parsed_ins.args;
@@ -49,7 +51,7 @@ impl IllegalCodeState {
                 Arg::Reg(Reg { reg: base, .. }),
                 _,
                 _,
-            ) if reg == base => Self::Illegal,
+            ) if reg == base => Self::Illegal { reason: "dereferencing shifted registers" },
 
             // Dereferencing registers offset by the same register
             (
@@ -58,21 +60,19 @@ impl IllegalCodeState {
                 _,
                 Arg::Reg(Reg { deref: true, reg: base, .. }),
                 Arg::OffsetReg(OffsetReg { reg: offset, .. }),
-            ) if base == offset => Self::Illegal,
+            ) if base == offset => {
+                Self::Illegal { reason: "dereferencing registers offset by itself" }
+            }
 
             // Reading from PC into PC
             (_, "ldm", Arg::Reg(Reg { reg: Register::Pc, .. }), Arg::RegList(reg_list), _)
                 if reg_list.contains(Register::Pc) =>
             {
-                Self::Illegal
+                Self::Illegal { reason: "reading from PC into PC" }
             }
 
             _ => Self::default(),
         }
-    }
-
-    pub fn is_illegal(self) -> bool {
-        self == Self::Illegal
     }
 }
 
