@@ -248,13 +248,14 @@ impl Section {
         line: &CommentedLine,
         context: &ParseContext,
         sections: &Sections,
+        module_kind: ModuleKind,
     ) -> Result<Self, SectionInheritParseError> {
         let mut words = iter_words(&line.text);
         let Some(name) = words.next() else {
             return EmptyLineSnafu { context: context.clone() }.fail()?;
         };
 
-        let migrate_section = MigrateSection::parse(name)?;
+        let migrate_section = MigrateSection::parse(name, module_kind)?;
 
         let inherit_section = match migrate_section {
             None => Some(
@@ -475,12 +476,16 @@ pub enum MigrateSection {
     Itcm,
     AutoloadData(u32),
     AutoloadBss(u32),
+    Exception,
+    Exceptix,
 }
 
 const DTCM_SECTION: &str = ".dtcm";
 const ITCM_SECTION: &str = ".itcm";
 const AUTOLOAD_DATA_SECTION_PREFIX: &str = ".autodata_";
 const AUTOLOAD_BSS_SECTION_PREFIX: &str = ".autobss_";
+const EXCEPTION_SECTION: &str = ".exception";
+const EXCEPTIX_SECTION: &str = ".exceptix";
 
 #[derive(Debug, Snafu)]
 pub enum MigrateSectionError {
@@ -489,10 +494,12 @@ pub enum MigrateSectionError {
 }
 
 impl MigrateSection {
-    pub fn parse(name: &str) -> Result<Option<Self>, MigrateSectionError> {
+    pub fn parse(name: &str, src_module: ModuleKind) -> Result<Option<Self>, MigrateSectionError> {
         match name {
             DTCM_SECTION => Ok(Some(Self::Dtcm)),
             ITCM_SECTION => Ok(Some(Self::Itcm)),
+            EXCEPTION_SECTION if src_module != ModuleKind::Arm9 => Ok(Some(Self::Exception)),
+            EXCEPTIX_SECTION if src_module != ModuleKind::Arm9 => Ok(Some(Self::Exceptix)),
             _ => {
                 if let Some(index) = name.strip_prefix(AUTOLOAD_DATA_SECTION_PREFIX) {
                     let index: u32 = index.parse().map_err(|error| {
@@ -521,6 +528,8 @@ impl MigrateSection {
             MigrateSection::AutoloadBss(index) => {
                 format!("{AUTOLOAD_BSS_SECTION_PREFIX}{index}").into()
             }
+            MigrateSection::Exception => EXCEPTION_SECTION.into(),
+            MigrateSection::Exceptix => EXCEPTIX_SECTION.into(),
         }
     }
 
@@ -530,6 +539,8 @@ impl MigrateSection {
             MigrateSection::Itcm => ".text",
             MigrateSection::AutoloadData(_) => ".data",
             MigrateSection::AutoloadBss(_) => ".bss",
+            MigrateSection::Exception => EXCEPTION_SECTION,
+            MigrateSection::Exceptix => EXCEPTIX_SECTION,
         }
     }
 
@@ -551,6 +562,8 @@ impl MigrateSection {
             MigrateSection::Itcm => SectionKind::Code,
             MigrateSection::AutoloadData(_) => SectionKind::Data,
             MigrateSection::AutoloadBss(_) => SectionKind::Bss,
+            MigrateSection::Exception => SectionKind::Rodata,
+            MigrateSection::Exceptix => SectionKind::Rodata,
         }
     }
 
@@ -561,6 +574,8 @@ impl MigrateSection {
             MigrateSection::AutoloadData(index) | MigrateSection::AutoloadBss(index) => {
                 ModuleKind::Autoload(AutoloadKind::Unknown(*index))
             }
+            MigrateSection::Exception => ModuleKind::Arm9,
+            MigrateSection::Exceptix => ModuleKind::Arm9,
         }
     }
 }

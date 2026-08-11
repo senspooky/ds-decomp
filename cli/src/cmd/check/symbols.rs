@@ -4,11 +4,18 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use ds_decomp::config::{
     config::Config,
+    delinks::Delinks,
     module::ModuleKind,
     symbol::{SymbolKind, SymbolMap, SymbolMaps},
 };
 
-use crate::{config::symbol::SymbolMapsExt, util::io::read_file};
+use crate::{
+    config::{
+        delinks::{DelinksMap, DelinksMapOptions},
+        symbol::SymbolMapsExt,
+    },
+    util::io::read_file,
+};
 
 /// Verifies that built modules are matching the base ROM.
 #[derive(Args)]
@@ -42,28 +49,42 @@ impl CheckSymbols {
         let mut success = true;
 
         let symbol_maps = SymbolMaps::from_config(config_path, &config)?;
+        let delinks_map = DelinksMap::from_config(&config, config_path, DelinksMapOptions {
+            migrate_sections: false,
+            generate_gap_files: false,
+            module_filter: Vec::new(),
+        })?;
         if let Some(target_symbols) = symbol_maps.get(ModuleKind::Arm9) {
+            let delinks = delinks_map
+                .get(ModuleKind::Arm9)
+                .context("Symbol map exists for ARM9 main but not delinks")?;
             let object_symbols = object_symbol_maps
                 .get(ModuleKind::Arm9)
                 .context("ARM9 symbols not found in linked binary")?;
-            success &= self.check_symbol_map(object_symbols, target_symbols, ModuleKind::Arm9);
+            success &= self.check_symbol_map(object_symbols, target_symbols, delinks);
         }
         for autoload in &config.autoloads {
             let module_kind = ModuleKind::Autoload(autoload.kind);
             if let Some(target_symbols) = symbol_maps.get(module_kind) {
+                let delinks = delinks_map.get(module_kind).with_context(|| {
+                    format!("Symbol map exists for {module_kind} but not delinks")
+                })?;
                 let object_symbols = object_symbol_maps.get(module_kind).with_context(|| {
                     format!("Symbols for {module_kind} not found in linked binary")
                 })?;
-                success &= self.check_symbol_map(object_symbols, target_symbols, module_kind);
+                success &= self.check_symbol_map(object_symbols, target_symbols, delinks);
             }
         }
         for overlay in &config.overlays {
             let module_kind = ModuleKind::Overlay(overlay.id);
             if let Some(target_symbols) = symbol_maps.get(module_kind) {
+                let delinks = delinks_map.get(module_kind).with_context(|| {
+                    format!("Symbol map exists for {module_kind} but not delinks")
+                })?;
                 let object_symbols = object_symbol_maps.get(module_kind).with_context(|| {
                     format!("Symbols for {module_kind} not found in linked binary")
                 })?;
-                success &= self.check_symbol_map(object_symbols, target_symbols, module_kind);
+                success &= self.check_symbol_map(object_symbols, target_symbols, delinks);
             }
         }
 
@@ -74,12 +95,9 @@ impl CheckSymbols {
         Ok(())
     }
 
-    fn check_symbol_map(
-        &self,
-        object: &SymbolMap,
-        target: &SymbolMap,
-        module_kind: ModuleKind,
-    ) -> bool {
+    fn check_symbol_map(&self, object: &SymbolMap, target: &SymbolMap, delinks: &Delinks) -> bool {
+        let module_kind = delinks.module_kind();
+
         let mut num_mismatches = 0;
 
         for target_symbol in target.iter() {
@@ -90,6 +108,13 @@ impl CheckSymbols {
 
             if matches!(target_symbol.kind, SymbolKind::Label(_)) {
                 // Label symbols are not imported by SymbolMapsExt::from_object
+                continue;
+            }
+            if let Some((_, section)) =
+                delinks.sections.get_by_contained_address(target_symbol.addr)
+                && section.name() == ".exceptix"
+            {
+                // Exception table index symbols are stripped by the EXCEPTION command in the LCF
                 continue;
             }
 

@@ -103,6 +103,11 @@ pub fn find_local_data_from_pools(
                     continue;
                 }
 
+                if relocations.get(pool_constant.address).is_some() {
+                    // This relocation was already found in a previous analysis phase
+                    return Ok(());
+                }
+
                 // Relocate function pointer
                 let reloc =
                     relocations.add_load(pool_constant.address, pointer, 0, module_kind.into())?;

@@ -35,9 +35,8 @@ SECTIONS \{
         {{ for file in section.files -}}
         {file.name}({file.section_name})
         {{ endfor }}
-        {{ if section.append_zero -}}
-        WRITEW(0);
-        {{- endif }}
+        {{ if section.append_zero }}WRITEW(0);{{ endif }}
+        {{ if section.exceptix }}EXCEPTION{{ endif }}
         . = ALIGN({section.end_alignment});
         {section.end_symbol} = .;
         {{ endfor }}
