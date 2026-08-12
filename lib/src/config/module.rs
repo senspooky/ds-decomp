@@ -29,7 +29,7 @@ use crate::{
     analysis::{
         ctor::{CtorRange, CtorRangeError},
         data::{self, FindLocalDataOptions, find_function_labels},
-        exception::{ExceptionData, ExceptionDataError, FindExceptionTableFn},
+        exception::{ExceptionData, ExceptionDataError, ExceptionTableEntry, FindExceptionTableFn},
         functions::{
             FindFunctionsOptions, Function, FunctionAnalysisError, FunctionParseOptions,
             FunctionSearchOptions, IntoFunctionError, ParseFunctionError, ParseFunctionOptions,
@@ -971,6 +971,24 @@ impl Module {
                 functions: None,
                 comments: Comments::new(),
             })?)?;
+
+            for (i, entry) in exception_data.exception_table.iter().enumerate() {
+                let address = exception_data.exceptix_start
+                    + (i * std::mem::size_of::<ExceptionTableEntry>()) as u32;
+                symbol_map.add_data(
+                    Some(format!("@EX@{:08x}", entry.function_address)),
+                    address,
+                    SymData::Word { count: Some(3) },
+                )?;
+
+                if (entry.function_length & 1) == 0 {
+                    symbol_map.add_data(
+                        Some(format!("@ET@{:08x}", entry.function_address)),
+                        entry.exception_record,
+                        SymData::Any,
+                    )?;
+                }
+            }
 
             exception_data.exceptix_end
         } else {

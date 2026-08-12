@@ -9,12 +9,13 @@ use crate::{
     util::bytes::FromSlice,
 };
 
-pub struct ExceptionData {
+pub struct ExceptionData<'a> {
     pub exception_start: Option<u32>,
     pub find_exception_table_fn: &'static FindExceptionTableFn,
     pub find_exception_table_fn_addr: u32,
     pub exceptix_start: u32,
     pub exceptix_end: u32,
+    pub exception_table: &'a [ExceptionTableEntry],
 }
 
 pub struct FindExceptionTableFn {
@@ -53,11 +54,11 @@ const FIND_EXCEPTION_TABLE_FUNCTIONS: &[FindExceptionTableFn] = &[
 
 #[repr(C)]
 #[derive(Zeroable, Pod, Clone, Copy)]
-struct ExceptionTableEntry {
-    function_start: u32,
-    function_length: u32,
+pub struct ExceptionTableEntry {
+    pub function_address: u32,
+    pub function_length: u32,
     /// This is a pointer if `(function_length & 1) == 0`, otherwise it's the whole exception record.
-    exception_record: u32,
+    pub exception_record: u32,
 }
 
 impl ExceptionTableEntry {
@@ -80,9 +81,9 @@ pub enum ExceptionDataError {
     DsRomBuildInfo { source: RawBuildInfoError },
 }
 
-impl ExceptionData {
+impl<'a> ExceptionData<'a> {
     pub fn analyze(
-        arm9: &Arm9,
+        arm9: &'a Arm9,
         unknown_autoloads: &[&Autoload],
     ) -> Result<Option<Self>, ExceptionDataError> {
         let arm9_code = arm9.code()?;
@@ -125,6 +126,7 @@ impl ExceptionData {
             find_exception_table_fn_addr,
             exceptix_start,
             exceptix_end,
+            exception_table,
         }))
     }
 

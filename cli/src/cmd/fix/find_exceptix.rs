@@ -3,10 +3,11 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result, bail};
 use clap::Args;
 use ds_decomp::{
-    analysis::exception::ExceptionData,
+    analysis::exception::{ExceptionData, ExceptionTableEntry},
     config::{
         config::Config,
         module::{FIND_EXCEPTION_TABLE_SYMBOL_NAME, ModuleKind},
+        symbol::SymData,
     },
 };
 use ds_rom::rom::raw::AutoloadKind;
@@ -65,6 +66,8 @@ impl FindExceptix {
             );
         }
 
+        self.add_exception_table_symbols(&mut program, exception_data)?;
+
         if self.dry {
             log::info!("Dry run, not writing changes to files.");
             return Ok(());
@@ -97,5 +100,60 @@ impl FindExceptix {
         } else {
             Ok(false)
         }
+    }
+
+    fn add_exception_table_symbols(
+        &self,
+        program: &mut Program,
+        exception_data: ExceptionData<'_>,
+    ) -> Result<(), anyhow::Error> {
+        let symbol_map = program.symbol_maps_mut().get_mut(ModuleKind::Arm9);
+        let mut ex_symbols = 0;
+        let mut et_symbols = 0;
+        for (i, entry) in exception_data.exception_table.iter().enumerate() {
+            let address = exception_data.exceptix_start
+                + (i * std::mem::size_of::<ExceptionTableEntry>()) as u32;
+
+            if let Some((id, symbol)) = symbol_map.by_address(address)? {
+                if !symbol.name.starts_with("@EX@") {
+                    symbol_map.remove(id);
+                    symbol_map.add_data(
+                        Some(format!("@EX@{:08x}", entry.function_address)),
+                        address,
+                        SymData::Word { count: Some(3) },
+                    )?;
+                }
+            } else {
+                symbol_map.add_data(
+                    Some(format!("@EX@{:08x}", entry.function_address)),
+                    address,
+                    SymData::Word { count: Some(3) },
+                )?;
+            }
+            ex_symbols += 1;
+
+            if (entry.function_length & 1) == 0 {
+                if let Some((id, symbol)) = symbol_map.by_address(entry.exception_record)? {
+                    if !symbol.name.starts_with("@ET@") {
+                        symbol_map.remove(id);
+                        symbol_map.add_data(
+                            Some(format!("@ET@{:08x}", entry.function_address)),
+                            entry.exception_record,
+                            SymData::Any,
+                        )?;
+                    }
+                } else {
+                    symbol_map.add_data(
+                        Some(format!("@ET@{:08x}", entry.function_address)),
+                        entry.exception_record,
+                        SymData::Any,
+                    )?;
+                }
+                et_symbols += 1;
+            }
+        }
+        log::info!("Found {ex_symbols} exception table records in .exception");
+        log::info!("Found {et_symbols} exception table entries in .exceptix");
+        Ok(())
     }
 }
