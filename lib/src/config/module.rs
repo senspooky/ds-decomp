@@ -1,7 +1,7 @@
 use std::{
     backtrace::Backtrace,
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet, btree_map},
+    collections::{BTreeMap, BTreeSet},
     fmt::Display,
     str::Utf8Error,
 };
@@ -940,10 +940,10 @@ impl Module {
                 exception_data.find_exception_table_fn_addr,
                 exception_data.find_exception_table_fn,
                 symbol_map,
-                &mut functions,
             )?
         {
             text_end = u32::max(text_end, function.end_address());
+            functions.insert(exception_data.find_exception_table_fn_addr, function);
         }
 
         self.add_text_section(FoundFunctions { functions, start: text_start, end: text_end })?;
@@ -1017,43 +1017,38 @@ impl Module {
         Ok(())
     }
 
-    fn analyze_find_exception_table_fn<'a>(
+    pub fn analyze_find_exception_table_fn(
         &mut self,
         find_fn_address: u32,
         find_fn: &FindExceptionTableFn,
         symbol_map: &mut SymbolMap,
-        functions: &'a mut BTreeMap<u32, Function>,
-    ) -> Result<Option<&'a Function>, ModuleError> {
+    ) -> Result<Option<Function>, ModuleError> {
         if (self.base_address()..self.end_address()).contains(&find_fn_address) {
-            let function = match functions.entry(find_fn_address) {
-                btree_map::Entry::Vacant(entry) => {
-                    let function = Function::parse_function(FunctionParseOptions {
-                        name: FIND_EXCEPTION_TABLE_SYMBOL_NAME.to_string(),
-                        start_address: find_fn_address,
-                        base_address: self.base_address,
-                        module_code: &self.code,
-                        known_end_address: None,
-                        module_start_address: self.base_address,
-                        module_end_address: self.end_address(),
-                        existing_functions: None,
-                        dsprot_encrypted_ranges: &[],
-                        check_defs_uses: false,
-                        parse_options: ParseFunctionOptions::default(),
-                    })?;
-                    symbol_map.add_function(&function);
-                    function.add_local_symbols_to_map(symbol_map)?;
-                    entry.insert(function);
-                    functions.get(&find_fn_address).unwrap()
-                }
-                btree_map::Entry::Occupied(_entry) => {
-                    symbol_map
-                        .rename_by_address(find_fn_address, FIND_EXCEPTION_TABLE_SYMBOL_NAME)?;
-                    // entry.get() causes borrow checker error, polonius might fix this
-                    functions.get(&find_fn_address).unwrap()
-                }
-            };
+            let function = Function::parse_function(FunctionParseOptions {
+                name: FIND_EXCEPTION_TABLE_SYMBOL_NAME.to_string(),
+                start_address: find_fn_address,
+                base_address: self.base_address,
+                module_code: &self.code,
+                known_end_address: None,
+                module_start_address: self.base_address,
+                module_end_address: self.end_address(),
+                existing_functions: None,
+                dsprot_encrypted_ranges: &[],
+                check_defs_uses: false,
+                parse_options: ParseFunctionOptions::default(),
+            })?;
+
+            if let Some((id, _)) = symbol_map.by_address(find_fn_address)? {
+                symbol_map.remove(id);
+            }
+            symbol_map.add_function(&function);
+
+            let reloc_from_exceptix_start = find_fn_address + find_fn.exceptix_start_offset;
+            let reloc_from_exceptix_end = find_fn_address + find_fn.exceptix_end_offset;
+            self.relocations.remove(reloc_from_exceptix_start);
+            self.relocations.remove(reloc_from_exceptix_end);
             self.relocations.add(Relocation::new(RelocationOptions {
-                from: find_fn_address + find_fn.exceptix_start_offset,
+                from: reloc_from_exceptix_start,
                 to: 0,
                 addend: 0,
                 kind: RelocationKind::LinkTimeConst(LinkTimeConst::ExceptionTableStart),
@@ -1061,7 +1056,7 @@ impl Module {
                 comments: Default::default(),
             }))?;
             self.relocations.add(Relocation::new(RelocationOptions {
-                from: find_fn_address + find_fn.exceptix_end_offset,
+                from: reloc_from_exceptix_end,
                 to: 0,
                 addend: 0,
                 kind: RelocationKind::LinkTimeConst(LinkTimeConst::ExceptionTableEnd),
@@ -1150,14 +1145,11 @@ impl Module {
         // Ensure __FindExceptionTable function is analyzed
         if let Some((find_fn, find_fn_addr, _, _)) =
             ExceptionData::find_exception_table_function(&self.code, self.base_address)?
-            && let Some(function) = self.analyze_find_exception_table_fn(
-                find_fn_addr,
-                find_fn,
-                symbol_map,
-                &mut functions,
-            )?
+            && let Some(function) =
+                self.analyze_find_exception_table_fn(find_fn_addr, find_fn, symbol_map)?
         {
             text_end = u32::max(text_end, function.end_address());
+            functions.insert(find_fn_addr, function);
         }
 
         if !functions.is_empty() {

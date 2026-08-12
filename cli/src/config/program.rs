@@ -5,7 +5,7 @@ use ds_decomp::config::{
     config::Config,
     module::{AnalysisOptions, Module, ModuleKind},
     section::SectionKind,
-    symbol::{SymBss, SymData, SymbolMaps},
+    symbol::{SymBss, SymData, SymbolMap, SymbolMaps},
 };
 use ds_rom::rom::Rom;
 
@@ -120,8 +120,11 @@ impl Program {
                                 symbol_map.add_data(Some(name), symbol.address, SymData::Any)?;
                             }
                             SectionKind::Bss => {
-                                symbol_map
-                                    .add_bss(Some(name), symbol.address, SymBss { size: None })?;
+                                symbol_map.add_bss(
+                                    Some(name),
+                                    symbol.address,
+                                    SymBss { size: None },
+                                )?;
                             }
                         }
                     }
@@ -206,6 +209,18 @@ impl Program {
 
     pub fn symbol_maps_mut(&mut self) -> &mut SymbolMaps {
         &mut self.symbol_maps
+    }
+
+    pub fn symbol_map_and_module_mut(
+        &mut self,
+        module_kind: ModuleKind,
+    ) -> Option<(&mut SymbolMap, &mut Module)> {
+        if let Some(module) = self.modules.iter_mut().find(|m| m.kind() == module_kind) {
+            let symbol_map = self.symbol_maps.get_mut(module_kind);
+            Some((symbol_map, module))
+        } else {
+            None
+        }
     }
 
     /// Writes the symbols.txt and relocs.txt files for each module in the program.
