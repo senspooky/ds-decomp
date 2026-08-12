@@ -14,7 +14,8 @@ MEMORY \{
 
 KEEP_SECTION \{
     .init,
-    .ctor
+    .ctor,
+    .exceptix
 }
 
 SECTIONS \{
