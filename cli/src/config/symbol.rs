@@ -6,7 +6,7 @@ use ds_decomp::{
     config::{
         Comments,
         module::ModuleKind,
-        relocations::Relocations,
+        relocations::{RelocationKind, Relocations},
         symbol::{
             InstructionMode, SymData, SymFunction, SymLabel, Symbol, SymbolKind, SymbolMap,
             SymbolMaps, SymbolScope,
@@ -394,21 +394,22 @@ impl SymbolLookup<'_> {
 
 impl LookupSymbol for SymbolLookup<'_> {
     fn lookup_symbol_name(&self, source: u32, destination: u32) -> Option<&str> {
+        // Workaround for unarm 1.9.2 bug where Thumb `blx #imm` gets parsed incorrectly when
+        // on a 2-byte boundary
+        let destination = match self.relocations.and_then(|r| r.get(source)) {
+            Some(reloc) if reloc.kind() == RelocationKind::ThumbCallArm => destination & !3,
+            _ => destination,
+        };
+
         if let Some((_, symbol)) = self.symbol_map.first_at_address(destination) {
             return Some(&symbol.name);
         }
         let relocations = self.relocations?;
-        if let Some(relocation) = relocations.get(source) {
-            let module_kind = relocation.module().first_module()?;
-            let external_symbol_map = self.symbol_maps.get(module_kind).unwrap();
+        let relocation = relocations.get(source)?;
 
-            if let Some((_, symbol)) = external_symbol_map.first_at_address(destination) {
-                Some(&symbol.name)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+        let module_kind = relocation.module().first_module()?;
+        let external_symbol_map = self.symbol_maps.get(module_kind).unwrap();
+
+        external_symbol_map.first_at_address(destination).map(|(_, symbol)| symbol.name.as_str())
     }
 }
