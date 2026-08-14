@@ -4,23 +4,29 @@ use bytemuck::{Pod, Zeroable};
 use ds_rom::rom::{Arm9, Autoload, raw::RawBuildInfoError};
 use snafu::Snafu;
 
-use crate::{config::section::SectionCodeError, util::bytes::FromSlice};
+use crate::{
+    config::{module::FIND_EXCEPTION_TABLE_SYMBOL_NAME, section::SectionCodeError},
+    util::bytes::FromSlice,
+};
 
-pub struct ExceptionData {
-    exception_start: Option<u32>,
-    exceptix_start: u32,
-    exceptix_end: u32,
+pub struct ExceptionData<'a> {
+    pub exception_start: Option<u32>,
+    pub find_exception_table_fn: &'static FindExceptionTableFn,
+    pub find_exception_table_fn_addr: u32,
+    pub exceptix_start: u32,
+    pub exceptix_end: u32,
+    pub exception_table: &'a [ExceptionTableEntry],
 }
 
-struct GetExceptixFunction {
-    code: &'static [u8],
+pub struct FindExceptionTableFn {
+    pub code: &'static [u8],
     // Offset of pool constants to the start and end of .exceptix
-    start_offset: u32,
-    end_offset: u32,
+    pub exceptix_start_offset: u32,
+    pub exceptix_end_offset: u32,
 }
 
-const GET_EXCEPTIX_FUNCTIONS: &[GetExceptixFunction] = &[
-    GetExceptixFunction {
+const FIND_EXCEPTION_TABLE_FUNCTIONS: &[FindExceptionTableFn] = &[
+    FindExceptionTableFn {
         code: &[
             0x10, 0x20, 0x9f, 0xe5, // ldr r2, [pc, #0x10]
             0x10, 0x10, 0x9f, 0xe5, // ldr r1, [pc, #0x10]
@@ -29,10 +35,10 @@ const GET_EXCEPTIX_FUNCTIONS: &[GetExceptixFunction] = &[
             0x01, 0x00, 0xa0, 0xe3, // mov r0, #1
             0x1e, 0xff, 0x2f, 0xe1, // bx lr
         ],
-        start_offset: 0x18,
-        end_offset: 0x1c,
+        exceptix_start_offset: 0x18,
+        exceptix_end_offset: 0x1c,
     },
-    GetExceptixFunction {
+    FindExceptionTableFn {
         code: &[
             0x02, 0x49, // ldr r1, [pc, #0x8]
             0xc1, 0x60, // str r1, [r0, #0xc]
@@ -41,18 +47,18 @@ const GET_EXCEPTIX_FUNCTIONS: &[GetExceptixFunction] = &[
             0x01, 0x20, // movs r0, #1
             0x70, 0x47, // bx lr
         ],
-        start_offset: 0xc,
-        end_offset: 0x10,
+        exceptix_start_offset: 0xc,
+        exceptix_end_offset: 0x10,
     },
 ];
 
 #[repr(C)]
 #[derive(Zeroable, Pod, Clone, Copy)]
-struct ExceptionTableEntry {
-    function_start: u32,
-    function_length: u32,
+pub struct ExceptionTableEntry {
+    pub function_address: u32,
+    pub function_length: u32,
     /// This is a pointer if `(function_length & 1) == 0`, otherwise it's the whole exception record.
-    exception_record: u32,
+    pub exception_record: u32,
 }
 
 impl ExceptionTableEntry {
@@ -75,25 +81,32 @@ pub enum ExceptionDataError {
     DsRomBuildInfo { source: RawBuildInfoError },
 }
 
-impl ExceptionData {
+impl<'a> ExceptionData<'a> {
     pub fn analyze(
-        arm9: &Arm9,
+        arm9: &'a Arm9,
         unknown_autoloads: &[&Autoload],
     ) -> Result<Option<Self>, ExceptionDataError> {
         let arm9_code = arm9.code()?;
 
-        let mut exceptix_result = Self::find_get_exceptix_function(arm9_code, arm9.base_address())?;
+        let mut exceptix_result =
+            Self::find_exception_table_function(arm9_code, arm9.base_address())?;
         if exceptix_result.is_none() {
             for autoload in unknown_autoloads {
                 exceptix_result =
-                    Self::find_get_exceptix_function(autoload.code(), autoload.base_address())?;
+                    Self::find_exception_table_function(autoload.code(), autoload.base_address())?;
                 if exceptix_result.is_some() {
                     break;
                 }
             }
         }
 
-        let Some((exceptix_start, exceptix_end)) = exceptix_result else {
+        let Some((
+            find_exception_table_fn,
+            find_exception_table_fn_addr,
+            exceptix_start,
+            exceptix_end,
+        )) = exceptix_result
+        else {
             return Ok(None);
         };
 
@@ -107,13 +120,20 @@ impl ExceptionData {
         let exception_start =
             exception_table.iter().filter_map(|entry| entry.exception_record_pointer()).min();
 
-        Ok(Some(ExceptionData { exception_start, exceptix_start, exceptix_end }))
+        Ok(Some(ExceptionData {
+            exception_start,
+            find_exception_table_fn,
+            find_exception_table_fn_addr,
+            exceptix_start,
+            exceptix_end,
+            exception_table,
+        }))
     }
 
-    fn find_get_exceptix_function(
+    pub fn find_exception_table_function(
         module_code: &[u8],
         base_address: u32,
-    ) -> Result<Option<(u32, u32)>, ExceptionDataError> {
+    ) -> Result<Option<(&'static FindExceptionTableFn, u32, u32, u32)>, ExceptionDataError> {
         let end_address = base_address + module_code.len() as u32;
         log::debug!(
             "Searching for exception table in {:#010x}..{:#010x}",
@@ -123,7 +143,7 @@ impl ExceptionData {
 
         for address in (base_address..end_address).step_by(4) {
             let code = &module_code[(address - base_address) as usize..];
-            let Some(get_exceptix) = GET_EXCEPTIX_FUNCTIONS
+            let Some(find_exception_table_fn) = FIND_EXCEPTION_TABLE_FUNCTIONS
                 .iter()
                 .find(|get_exceptix| code.starts_with(get_exceptix.code))
             else {
@@ -131,33 +151,24 @@ impl ExceptionData {
             };
 
             let exceptix_start = u32::from_le_slice(
-                &code[get_exceptix.start_offset as usize..get_exceptix.start_offset as usize + 4],
+                &code[find_exception_table_fn.exceptix_start_offset as usize
+                    ..find_exception_table_fn.exceptix_start_offset as usize + 4],
             );
             let exceptix_end = u32::from_le_slice(
-                &code[get_exceptix.end_offset as usize..get_exceptix.end_offset as usize + 4],
+                &code[find_exception_table_fn.exceptix_end_offset as usize
+                    ..find_exception_table_fn.exceptix_end_offset as usize + 4],
             );
 
             log::debug!(
-                "Found get_exceptix function at {:#010x} with exceptix start {:#010x} and end {:#010x}",
+                "Found {} function at {:#010x} with .exceptix start {:#010x} and end {:#010x}",
+                FIND_EXCEPTION_TABLE_SYMBOL_NAME,
                 address,
                 exceptix_start,
                 exceptix_end
             );
 
-            return Ok(Some((exceptix_start, exceptix_end)));
+            return Ok(Some((find_exception_table_fn, address, exceptix_start, exceptix_end)));
         }
         Ok(None)
-    }
-
-    pub fn exception_start(&self) -> Option<u32> {
-        self.exception_start
-    }
-
-    pub fn exceptix_start(&self) -> u32 {
-        self.exceptix_start
-    }
-
-    pub fn exceptix_end(&self) -> u32 {
-        self.exceptix_end
     }
 }

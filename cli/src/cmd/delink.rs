@@ -163,28 +163,25 @@ impl<'a> Delinker<'a> {
             for section in file.sections.iter() {
                 let module = self.program.by_module_kind(delinks.module_kind()).unwrap();
                 let (symbol_map, section_end) = if let Some(migrate_section) =
-                    MigrateSection::parse(section.name())?
+                    MigrateSection::parse(section.name(), delinks.module_kind())?
                 {
-                    let autoload_kind = match migrate_section {
-                        MigrateSection::Dtcm => AutoloadKind::Dtcm,
-                        MigrateSection::Itcm => AutoloadKind::Itcm,
-                        MigrateSection::AutoloadData(index)
-                        | MigrateSection::AutoloadBss(index) => AutoloadKind::Unknown(index),
+                    let section_end = match migrate_section.module_kind() {
+                        ModuleKind::Arm9 => self.rom.arm9().end_address()?,
+                        ModuleKind::Overlay(id) => {
+                            self.rom.arm7_overlays()[id as usize].end_address()
+                        }
+                        ModuleKind::Autoload(autoload_kind) => self
+                            .rom
+                            .arm9()
+                            .autoloads()?
+                            .iter()
+                            .find_map(|a| (a.kind() == autoload_kind).then_some(a.end_address()))
+                            .context("Failed to find end address of autoload")?,
                     };
-                    let autoload_end = self
-                        .rom
-                        .arm9()
-                        .autoloads()?
-                        .iter()
-                        .find_map(|a| (a.kind() == autoload_kind).then_some(a.end_address()))
-                        .context("Failed to find end address of DTCM autoload")?;
-                    (
-                        self.program
-                            .symbol_maps()
-                            .get(ModuleKind::Autoload(autoload_kind))
-                            .unwrap(),
-                        autoload_end,
-                    )
+
+                    let symbol_map =
+                        self.program.symbol_maps().get(migrate_section.module_kind()).unwrap();
+                    (symbol_map, section_end)
                 } else {
                     let (_, module_section) = module.sections().by_name(section.name()).unwrap();
                     (symbol_map, module_section.end_address())
@@ -251,20 +248,20 @@ impl<'a> Delinker<'a> {
                 // delinked from the source module
                 continue;
             }
-            delink_object.define_section(file_section, self.all_mapping_symbols)?;
+            delink_object.define_section(file_section, module_kind, self.all_mapping_symbols)?;
         }
         for file_section in delink_file.migrated_sections.iter() {
-            delink_object.define_section(file_section, self.all_mapping_symbols)?;
+            delink_object.define_section(file_section, module_kind, self.all_mapping_symbols)?;
         }
 
         let mut error = false;
 
         // Must start a new loop here so we can know which section a symbol ID belongs to
         for file_section in delink_file.sections.iter() {
-            error |= delink_object.define_relocations(file_section)?;
+            error |= delink_object.define_relocations(file_section, module_kind)?;
         }
         for file_section in delink_file.migrated_sections.iter() {
-            error |= delink_object.define_relocations(file_section)?;
+            error |= delink_object.define_relocations(file_section, module_kind)?;
         }
         if error {
             bail!("Failed to delink '{}', see errors above", delink_file.name);
@@ -308,13 +305,15 @@ impl<'a> DelinkObject<'a> {
     fn define_section(
         &mut self,
         file_section: &Section,
+        src_module: ModuleKind,
         all_mapping_symbols: bool,
     ) -> Result<(), anyhow::Error> {
-        let symbol_module = if let Some(migration) = MigrateSection::parse(file_section.name())? {
-            migration.module_kind()
-        } else {
-            self.current_module
-        };
+        let symbol_module =
+            if let Some(migration) = MigrateSection::parse(file_section.name(), src_module)? {
+                migration.module_kind()
+            } else {
+                self.current_module
+            };
         let module = self.program.by_module_kind(symbol_module).unwrap();
 
         let code = file_section
@@ -404,7 +403,11 @@ impl<'a> DelinkObject<'a> {
         Ok(())
     }
 
-    fn define_relocations(&mut self, file_section: &Section) -> Result<bool, anyhow::Error> {
+    fn define_relocations(
+        &mut self,
+        file_section: &Section,
+        src_module: ModuleKind,
+    ) -> Result<bool, anyhow::Error> {
         let symbol_map = self.program.symbol_maps().get(self.current_module).unwrap();
 
         let mut error = false;
@@ -420,7 +423,7 @@ impl<'a> DelinkObject<'a> {
                 )
             })
             .unwrap();
-        let module_kind = MigrateSection::parse(file_section.name())?
+        let module_kind = MigrateSection::parse(file_section.name(), src_module)?
             .map_or(self.current_module, |m| m.module_kind());
         let module = self.program.by_module_kind(module_kind).unwrap();
         for (_, relocation) in module.relocations().iter_range(file_section.address_range()) {

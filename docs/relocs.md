@@ -28,6 +28,8 @@ from:FROM kind:KIND to:TO add:ADD module:MODULE
     - `__CODE_HI`: End address of static memory in main RAM.
     - `__OVERLAY_COUNT`: Number of overlays.
     - `ARM9_CTOR_START`: Base address of .ctor in main ARM9 program.
+    - `__exception_table_start__`: Base address of .exceptix in main ARM9 program.
+    - `__exception_table_end__`: End address of .exceptix in main ARM9 program.
 
 ### Destination module
 - `none`: No destination symbol found due to poor analysis by `dsd init`. Many `dsd` subcommands will fail.

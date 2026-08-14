@@ -60,6 +60,7 @@ struct LcfSection {
     start_symbol: String,
     end_symbol: String,
     append_zero: bool,
+    exceptix: bool,
     files: Vec<LcfFile>,
 }
 
@@ -149,6 +150,8 @@ impl Lcf {
                     LinkTimeConst::CodeHi => "ADDR(SPACE)".to_string(),
                     LinkTimeConst::OverlayCount => overlay_count.to_string(),
                     LinkTimeConst::Arm9CtorStart => return None, // ARM9_CTOR_START already exists
+                    LinkTimeConst::ExceptionTableStart => return None, // __exception_table_start__
+                    LinkTimeConst::ExceptionTableEnd => return None, // __exception_table_end__
                 };
                 Some(LcfVariable::new(var.to_string(), value))
             })
@@ -290,26 +293,38 @@ impl LcfModule {
                 let name = section.name().to_string();
                 let alignment = section.alignment();
                 let append_zero = section.name() == ".ctor";
+                let exceptix = section.name() == ".exceptix";
                 let end_address = section.end_address() + if append_zero { 4 } else { 0 };
                 let end_alignment = if end_address % 32 == 0 { 32 } else { 4 };
-                let boundary_name = section.boundary_name();
-                let start_symbol = format!("{module_name}_{boundary_name}_START");
-                let end_symbol = format!("{module_name}_{boundary_name}_END");
-                let files = delinks
-                    .files
-                    .iter()
-                    .filter_map(|file| {
-                        file.sections
-                            .by_name(&name)
-                            .map(|(_, section)| (file, section.source_name().to_string()))
-                    })
-                    .map(|(file, section_name)| {
-                        let (file, _) = file.split_file_ext();
-                        let name =
-                            file.rsplit_once(['/', '\\']).map_or(file, |(_, basefile)| basefile);
-                        LcfFile { name: format!("{name}.o"), section_name }
-                    })
-                    .collect::<Vec<_>>();
+                let (start_symbol, end_symbol) = if exceptix {
+                    ("__exception_table_start__".to_string(), "__exception_table_end__".to_string())
+                } else {
+                    let boundary_name = section.boundary_name();
+                    (
+                        format!("{module_name}_{boundary_name}_START"),
+                        format!("{module_name}_{boundary_name}_END"),
+                    )
+                };
+                let files = if exceptix {
+                    Vec::new()
+                } else {
+                    delinks
+                        .files
+                        .iter()
+                        .filter_map(|file| {
+                            file.sections
+                                .by_name(&name)
+                                .map(|(_, section)| (file, section.source_name().to_string()))
+                        })
+                        .map(|(file, section_name)| {
+                            let (file, _) = file.split_file_ext();
+                            let name = file
+                                .rsplit_once(['/', '\\'])
+                                .map_or(file, |(_, basefile)| basefile);
+                            LcfFile { name: format!("{name}.o"), section_name }
+                        })
+                        .collect::<Vec<_>>()
+                };
                 LcfSection {
                     name,
                     alignment,
@@ -317,6 +332,7 @@ impl LcfModule {
                     start_symbol,
                     end_symbol,
                     append_zero,
+                    exceptix,
                     files,
                 }
             })

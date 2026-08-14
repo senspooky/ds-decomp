@@ -1,6 +1,7 @@
 mod ctor_symbols;
 mod ctor_zero;
 mod dsprot;
+mod find_exceptix;
 mod ov_sigs;
 mod thumb_nop;
 
@@ -8,6 +9,7 @@ use clap::{Args, Subcommand};
 use ctor_symbols::*;
 use ctor_zero::*;
 use dsprot::*;
+use find_exceptix::*;
 use ov_sigs::*;
 use thumb_nop::*;
 
@@ -26,6 +28,7 @@ impl FixArgs {
             FixCommands::CtorZero(ctor_zero) => ctor_zero.run(),
             FixCommands::Dsprot(dsprot) => dsprot.run(),
             FixCommands::OvSigs(ov_sigs) => ov_sigs.run(),
+            FixCommands::FindExceptix(find_exceptix) => find_exceptix.run(),
         }
     }
 }
@@ -37,4 +40,5 @@ enum FixCommands {
     CtorZero(FixCtorZero),
     Dsprot(FixDsprot),
     OvSigs(FixOvSigs),
+    FindExceptix(FindExceptix),
 }

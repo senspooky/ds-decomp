@@ -71,9 +71,13 @@ impl Delinks {
             context.row = line.row;
             if line.text.trim().is_empty() {
                 continue;
-            } else if let Some(delink_file) =
-                Self::try_parse_delink_file(&line, &mut lines, &mut context, &sections)?
-            {
+            } else if let Some(delink_file) = Self::try_parse_delink_file(
+                &line,
+                &mut lines,
+                &mut context,
+                &sections,
+                module_kind,
+            )? {
                 files.push(delink_file);
                 break;
             } else if let Some(new_categories) = Categories::try_parse(&line) {
@@ -92,9 +96,13 @@ impl Delinks {
 
             if line.text.trim().is_empty() {
                 continue;
-            } else if let Some(delink_file) =
-                Self::try_parse_delink_file(&line, &mut lines, &mut context, &sections)?
-            {
+            } else if let Some(delink_file) = Self::try_parse_delink_file(
+                &line,
+                &mut lines,
+                &mut context,
+                &sections,
+                module_kind,
+            )? {
                 files.push(delink_file);
             }
         }
@@ -107,9 +115,10 @@ impl Delinks {
         lines: &mut Peekable<CommentedLineIterator>,
         context: &mut ParseContext,
         sections: &Sections,
+        module_kind: ModuleKind,
     ) -> Result<Option<DelinkFile>, DelinkFileParseError> {
         if line.text.chars().next().is_some_and(|c| !c.is_whitespace()) {
-            let delink_file = DelinkFile::parse(line, lines, context, sections)?;
+            let delink_file = DelinkFile::parse(line, lines, context, sections, module_kind)?;
             Ok(Some(delink_file))
         } else {
             Ok(None)
@@ -207,6 +216,7 @@ impl DelinkFile {
         lines: &mut Peekable<CommentedLineIterator>,
         context: &mut ParseContext,
         inherit_sections: &Sections,
+        module_kind: ModuleKind,
     ) -> Result<Self, DelinkFileParseError> {
         let name = first_line
             .text
@@ -241,7 +251,8 @@ impl DelinkFile {
             } else if let Some(new_categories) = Categories::try_parse(&line) {
                 categories.extend(new_categories);
             } else {
-                let section = Section::parse_inherit(&line, context, inherit_sections)?;
+                let section =
+                    Section::parse_inherit(&line, context, inherit_sections, module_kind)?;
                 sections.add(section).map_err(|error| {
                     delink_file_parse_error::SectionsSnafu { context: context.clone(), error }
                         .build()

@@ -29,7 +29,7 @@ use crate::{
     analysis::{
         ctor::{CtorRange, CtorRangeError},
         data::{self, FindLocalDataOptions, find_function_labels},
-        exception::{ExceptionData, ExceptionDataError},
+        exception::{ExceptionData, ExceptionDataError, ExceptionTableEntry, FindExceptionTableFn},
         functions::{
             FindFunctionsOptions, Function, FunctionAnalysisError, FunctionParseOptions,
             FunctionSearchOptions, IntoFunctionError, ParseFunctionError, ParseFunctionOptions,
@@ -123,6 +123,7 @@ pub const MAIN_FN_SYMBOL_NAME: &str = "main";
 pub const BUILD_INFO_SYMBOL_NAME: &str = "BuildInfo";
 pub const AUTOLOAD_CALLBACK_SYMBOL_NAME: &str = "AutoloadCallback";
 pub const OVERLAY_SIGNATURES_SYMBOL_NAME: &str = "OverlaySignatures";
+pub const FIND_EXCEPTION_TABLE_SYMBOL_NAME: &str = "__FindExceptionTable";
 
 pub struct OverlayModuleOptions<'a> {
     pub id: u16,
@@ -886,7 +887,7 @@ impl Module {
         functions.extend(entry_functions);
 
         // All other functions, starting from main
-        let exception_start = exception_data.as_ref().and_then(ExceptionData::exception_start);
+        let exception_start = exception_data.as_ref().and_then(|e| e.exception_start);
         let text_max = exception_start.unwrap_or(read_only_end);
         let build_info_end = self.find_build_info_end_address(arm9)?;
 
@@ -903,7 +904,7 @@ impl Module {
             dsprot_encrypted_ranges,
             ..Default::default()
         };
-        let FoundFunctions { functions: text_functions, end: text_end, .. } = self
+        let FoundFunctions { functions: text_functions, end: mut text_end, .. } = self
             .find_functions(
                 symbol_map,
                 &FunctionSearchOptions {
@@ -933,16 +934,28 @@ impl Module {
             functions.extend(pre_main.functions);
         }
 
+        // Ensure __FindExceptionTable function is analyzed
+        if let Some(exception_data) = &exception_data
+            && let Some(function) = self.analyze_find_exception_table_fn(
+                exception_data.find_exception_table_fn_addr,
+                exception_data.find_exception_table_fn,
+                symbol_map,
+            )?
+        {
+            text_end = u32::max(text_end, function.end_address());
+            functions.insert(exception_data.find_exception_table_fn_addr, function);
+        }
+
         self.add_text_section(FoundFunctions { functions, start: text_start, end: text_end })?;
 
         // Add .exception and .exceptix sections if they exist
         let text_exceptix_end = if let Some(exception_data) = exception_data {
-            if let Some(exception_start) = exception_data.exception_start() {
+            if let Some(exception_start) = exception_data.exception_start {
                 self.sections.add(Section::new(SectionOptions {
                     name: ".exception".to_string(),
                     kind: SectionKind::Rodata,
                     start_address: exception_start,
-                    end_address: exception_data.exceptix_start(),
+                    end_address: exception_data.exceptix_start,
                     alignment: 1,
                     functions: None,
                     comments: Comments::new(),
@@ -952,14 +965,32 @@ impl Module {
             self.sections.add(Section::new(SectionOptions {
                 name: ".exceptix".to_string(),
                 kind: SectionKind::Rodata,
-                start_address: exception_data.exceptix_start(),
-                end_address: exception_data.exceptix_end(),
+                start_address: exception_data.exceptix_start,
+                end_address: exception_data.exceptix_end,
                 alignment: 4,
                 functions: None,
                 comments: Comments::new(),
             })?)?;
 
-            exception_data.exceptix_end()
+            for (i, entry) in exception_data.exception_table.iter().enumerate() {
+                let address = exception_data.exceptix_start
+                    + (i * std::mem::size_of::<ExceptionTableEntry>()) as u32;
+                symbol_map.add_data(
+                    Some(format!("@EX@{:08x}", entry.function_address)),
+                    address,
+                    SymData::Word { count: Some(3) },
+                )?;
+
+                if (entry.function_length & 1) == 0 {
+                    symbol_map.add_data(
+                        Some(format!("@ET@{:08x}", entry.function_address)),
+                        entry.exception_record,
+                        SymData::Any,
+                    )?;
+                }
+            }
+
+            exception_data.exceptix_end
         } else {
             text_end
         };
@@ -1002,6 +1033,58 @@ impl Module {
         }
 
         Ok(())
+    }
+
+    pub fn analyze_find_exception_table_fn(
+        &mut self,
+        find_fn_address: u32,
+        find_fn: &FindExceptionTableFn,
+        symbol_map: &mut SymbolMap,
+    ) -> Result<Option<Function>, ModuleError> {
+        if (self.base_address()..self.end_address()).contains(&find_fn_address) {
+            let function = Function::parse_function(FunctionParseOptions {
+                name: FIND_EXCEPTION_TABLE_SYMBOL_NAME.to_string(),
+                start_address: find_fn_address,
+                base_address: self.base_address,
+                module_code: &self.code,
+                known_end_address: None,
+                module_start_address: self.base_address,
+                module_end_address: self.end_address(),
+                existing_functions: None,
+                dsprot_encrypted_ranges: &[],
+                check_defs_uses: false,
+                parse_options: ParseFunctionOptions::default(),
+            })?;
+
+            if let Some((id, _)) = symbol_map.by_address(find_fn_address)? {
+                symbol_map.remove(id);
+            }
+            symbol_map.add_function(&function);
+
+            let reloc_from_exceptix_start = find_fn_address + find_fn.exceptix_start_offset;
+            let reloc_from_exceptix_end = find_fn_address + find_fn.exceptix_end_offset;
+            self.relocations.remove(reloc_from_exceptix_start);
+            self.relocations.remove(reloc_from_exceptix_end);
+            self.relocations.add(Relocation::new(RelocationOptions {
+                from: reloc_from_exceptix_start,
+                to: 0,
+                addend: 0,
+                kind: RelocationKind::LinkTimeConst(LinkTimeConst::ExceptionTableStart),
+                module: RelocationModule::Main,
+                comments: Default::default(),
+            }))?;
+            self.relocations.add(Relocation::new(RelocationOptions {
+                from: reloc_from_exceptix_end,
+                to: 0,
+                addend: 0,
+                kind: RelocationKind::LinkTimeConst(LinkTimeConst::ExceptionTableEnd),
+                module: RelocationModule::Main,
+                comments: Default::default(),
+            }))?;
+            Ok(Some(function))
+        } else {
+            Ok(None)
+        }
     }
 
     fn find_build_info_end_address(&self, arm9: &Arm9) -> Result<u32, ModuleError> {
@@ -1061,7 +1144,7 @@ impl Module {
         };
         let code = autoload.code();
 
-        let text_functions = self.find_functions(
+        let (mut functions, mut text_end) = if let Some(f) = self.find_functions(
             symbol_map,
             &FunctionSearchOptions {
                 max_function_start_search_distance: 32,
@@ -1071,15 +1154,29 @@ impl Module {
                 ..Default::default()
             },
             &self.default_func_prefix.clone(),
-        )?;
-
-        let text_end = if let Some(text_functions) = text_functions {
-            let text_end = text_functions.end;
-            self.add_text_section(text_functions)?;
-            text_end
+        )? {
+            (f.functions, f.end)
         } else {
-            self.base_address
+            (BTreeMap::new(), self.base_address)
         };
+
+        // Ensure __FindExceptionTable function is analyzed
+        if let Some((find_fn, find_fn_addr, _, _)) =
+            ExceptionData::find_exception_table_function(&self.code, self.base_address)?
+            && let Some(function) =
+                self.analyze_find_exception_table_fn(find_fn_addr, find_fn, symbol_map)?
+        {
+            text_end = u32::max(text_end, function.end_address());
+            functions.insert(find_fn_addr, function);
+        }
+
+        if !functions.is_empty() {
+            self.add_text_section(FoundFunctions {
+                functions,
+                start: self.base_address,
+                end: text_end,
+            })?;
+        }
 
         let rodata_start = text_end.next_multiple_of(4);
         let rodata_end = rodata_start.next_multiple_of(32);

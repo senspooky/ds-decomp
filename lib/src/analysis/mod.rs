@@ -1,6 +1,6 @@
 pub(crate) mod ctor;
 pub(crate) mod data;
-pub(crate) mod exception;
+pub mod exception;
 mod function_branch;
 mod function_start;
 pub mod functions;
