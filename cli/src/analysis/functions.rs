@@ -253,7 +253,7 @@ fn write_numerical_jump_table_entry<W: io::Write>(
             "Expected label for jump table destination from {address:#010x} to {label_address:#010x}"
         );
     };
-    write!(w, "    {} {} - {} {}", directive, label.name, sym.name, match jump {
+    writeln!(w, "    {} {} - {} {}", directive, label.name, sym.name, match jump {
         ThumbJumpTableJump::AddPc => "- 2",
         ThumbJumpTableJump::Bx => "+ 1",
     },)?;
