@@ -31,6 +31,8 @@ pub enum CtorRangeError {
         ".ctor runner at {address:#010x} not in range of module '{module_kind}:\n{backtrace}'"
     ))]
     CtorRunnerNotInRange { address: u32, module_kind: ModuleKind, backtrace: Backtrace },
+    #[snafu(display(".ctor section at {address:#010x} has no terminating zero:\n{backtrace}"))]
+    UnterminatedCtor { address: u32, backtrace: Backtrace },
 }
 
 impl CtorRange {
@@ -53,10 +55,13 @@ impl CtorRange {
         last_called_function
     }
 
+    /// Finds the `.ctor` section of the ARM9 module, which lists the module's static initializers. Returns `None` if the
+    /// game has no such section, which happens in later SDK versions where every module instead points at its own list of
+    /// static initializers, gathered into a table in DTCM at startup.
     pub fn find_in_arm9(
         arm9: &Arm9,
         unknown_autoloads: &[&Autoload],
-    ) -> Result<Self, CtorRangeError> {
+    ) -> Result<Option<Self>, CtorRangeError> {
         let code = arm9.code()?;
 
         let entry_addr = arm9.entry_function();
@@ -151,14 +156,26 @@ impl CtorRange {
             ctor_start_data[3],
         ]);
 
-        let num_ctors = code[(ctor_start - arm9.base_address()) as usize..]
+        // In later SDK versions the static initializer runner walks a table in DTCM, which every module registers its own
+        // list of initializers into at startup. Such games have no .ctor section in the ARM9 module, and the pool constant
+        // points into DTCM instead.
+        let ctor_offset = ctor_start.checked_sub(arm9.base_address()).map(|o| o as usize);
+        let Some(ctor_code) = ctor_offset.and_then(|offset| code.get(offset..)) else {
+            log::warn!(
+                "Static initializers are at {ctor_start:#010x}, outside the ARM9 module, \
+                 assuming this game has no .ctor section"
+            );
+            return Ok(None);
+        };
+
+        let num_ctors = ctor_code
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .position(|ctor| ctor == 0)
-            .unwrap();
+            .ok_or_else(|| UnterminatedCtorSnafu { address: ctor_start }.build())?;
 
         let ctor_end = ctor_start + num_ctors as u32 * 4 + 4;
 
-        Ok(Self { start: ctor_start, end: ctor_end })
+        Ok(Some(Self { start: ctor_start, end: ctor_end }))
     }
 }

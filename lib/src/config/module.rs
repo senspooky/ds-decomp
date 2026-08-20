@@ -243,7 +243,7 @@ impl Module {
 
         module.find_sections_arm9(
             symbol_map,
-            &ctor_range,
+            ctor_range.as_ref(),
             exception_data,
             &arm9,
             &main_func,
@@ -256,11 +256,14 @@ impl Module {
         module.find_data_from_pools(
             symbol_map,
             options,
-            Some(BTreeMap::from([
+            ctor_range.as_ref().map(|ctor_range| {
                 // Empty .ctor sections won't be detected by relocation analysis, so instead
                 // override any pointer to .ctor to a link-time constant relocation
-                (ctor_range.start, RelocationKind::LinkTimeConst(LinkTimeConst::Arm9CtorStart)),
-            ])),
+                BTreeMap::from([(
+                    ctor_range.start,
+                    RelocationKind::LinkTimeConst(LinkTimeConst::Arm9CtorStart),
+                )])
+            }),
         )?;
         module.find_data_from_sections(symbol_map, options)?;
 
@@ -792,7 +795,7 @@ impl Module {
     fn find_sections_arm9(
         &mut self,
         symbol_map: &mut SymbolMap,
-        ctor: &CtorRange,
+        ctor: Option<&CtorRange>,
         exception_data: Option<ExceptionData>,
         arm9: &Arm9,
         main_func: &MainFunction,
@@ -806,23 +809,26 @@ impl Module {
             dsprot_result.map(|r| r.encrypted_ranges.as_slice()).unwrap_or(&[]);
 
         // .ctor and .init
-        let (read_only_end, rodata_start) = if let Some(init_functions) =
-            self.add_ctor_section(ctor, symbol_map)?
-        {
-            if let Some(init_range) = self.add_init_section(symbol_map, AddInitSectionOptions {
-                ctor,
-                init_functions,
-                continuous: false,
-                overriden_function_sizes,
-                dsprot_encrypted_functions,
-                dsprot_encrypted_ranges,
-            })? {
-                (init_range.0, Some(init_range.1))
+        let (read_only_end, rodata_start) = if let Some(ctor) = ctor {
+            if let Some(init_functions) = self.add_ctor_section(ctor, symbol_map)? {
+                if let Some(init_range) = self.add_init_section(symbol_map, AddInitSectionOptions {
+                    ctor,
+                    init_functions,
+                    continuous: false,
+                    overriden_function_sizes,
+                    dsprot_encrypted_functions,
+                    dsprot_encrypted_ranges,
+                })? {
+                    (init_range.0, Some(init_range.1))
+                } else {
+                    (ctor.start, None)
+                }
             } else {
                 (ctor.start, None)
             }
         } else {
-            (ctor.start, None)
+            // Games without a .ctor section have read-only data all the way to the end of the module's code.
+            (self.base_address + self.code.len() as u32, None)
         };
 
         // Secure area functions (software interrupts)
@@ -996,12 +1002,15 @@ impl Module {
         };
 
         // .rodata
+        let code_end = self.base_address + self.code.len() as u32;
         let rodata_start = rodata_start.unwrap_or(text_exceptix_end);
-        self.add_rodata_section(rodata_start, ctor.start)?;
+        // Without a .ctor section there is nothing marking where read-only data ends and writable data begins, so all of it
+        // goes in .rodata and .data comes out empty.
+        self.add_rodata_section(rodata_start, ctor.map_or(code_end, |ctor| ctor.start))?;
 
         // .data and .bss
-        let data_start = ctor.end.next_multiple_of(32);
-        let data_end = self.base_address + self.code.len() as u32;
+        let data_start = ctor.map_or(code_end, |ctor| ctor.end).next_multiple_of(32);
+        let data_end = code_end;
         self.add_data_section(data_start, data_end)?;
         let bss_start = data_end.next_multiple_of(32);
         self.add_bss_section(bss_start)?;

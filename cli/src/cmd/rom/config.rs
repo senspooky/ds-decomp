@@ -381,6 +381,7 @@ impl ConfigRom {
             },
             encrypted: rom.arm9().originally_encrypted(),
             compressed: rom.arm9().originally_compressed(),
+            footer: rom.arm9().has_footer(),
             build_info: ds_rom::rom::BuildInfo {
                 bss_start: bss_range.start,
                 bss_end: bss_range.end,
