@@ -30,6 +30,10 @@ pub enum AnalyzeExternalReferencesError {
         from_module: ModuleKind,
         to_module: ModuleKind,
     },
+    #[snafu(display(
+        "The DS Protect relocation from {from:#010x} in {from_module} points to {to:#010x} which is outside of every module's address space"
+    ))]
+    InvalidDsProtReloc { from: u32, to: u32, from_module: ModuleKind },
     #[snafu(transparent)]
     SymbolMap { source: SymbolMapError },
     #[snafu(transparent)]
@@ -42,9 +46,64 @@ pub fn analyze_external_references(
     options: &mut AnalyzeExternalReferencesOptions,
 ) -> Result<RelocationResult, AnalyzeExternalReferencesError> {
     let mut result = RelocationResult::new();
+    // DS Protect relocations go first, as they know the addend of the value they point to. The
+    // caller discards later relocations from the same address, which would otherwise mistake the
+    // offset value for the pointer itself.
+    resolve_dsprot_relocations(options, &mut result)?;
     find_relocations_in_functions(&mut result, options)?;
     find_external_references_in_sections(options, &mut result)?;
     Ok(result)
+}
+
+/// Resolves the DS Protect relocations which point outside their own module, see
+/// [`Module::pending_dsprot_relocations`].
+fn resolve_dsprot_relocations(
+    options: &mut AnalyzeExternalReferencesOptions,
+    result: &mut RelocationResult,
+) -> Result<(), AnalyzeExternalReferencesError> {
+    let AnalyzeExternalReferencesOptions { modules, module_index, symbol_maps } = options;
+    let from_module = modules[*module_index].kind();
+
+    for relocation in modules[*module_index].pending_dsprot_relocations() {
+        let candidates =
+            find_symbol_candidates(modules, symbol_maps, *module_index, relocation.to_address);
+        if candidates.is_empty() {
+            // The destination exists in no module, or has no symbol that a relocation could refer
+            // to. The latter happens for pointers into encrypted code that function analysis
+            // couldn't recover, in which case the pointer stays a plain constant.
+            if !modules
+                .iter()
+                .any(|m| m.sections().get_by_contained_address(relocation.to_address).is_some())
+            {
+                let error = InvalidDsProtRelocSnafu {
+                    from: relocation.from_address,
+                    to: relocation.to_address,
+                    from_module,
+                }
+                .build();
+                log::error!("{error}");
+                return Err(error);
+            }
+            log::warn!(
+                "No symbol for the DS Protect relocation from {:#010x} in {from_module} to {:#010x}, leaving it unrelocated",
+                relocation.from_address,
+                relocation.to_address
+            );
+            continue;
+        }
+
+        let candidate_modules = candidates.iter().map(|c| &modules[c.module_index]);
+        let module = RelocationModule::from_modules(candidate_modules)?;
+
+        result.relocations.push(Relocation::new_load(
+            relocation.from_address,
+            relocation.to_address,
+            relocation.addend as i64,
+            module,
+        ));
+        result.external_symbols.push(ExternalSymbol { candidates, address: relocation.to_address });
+    }
+    Ok(())
 }
 
 fn find_external_references_in_sections(
@@ -214,7 +273,7 @@ fn find_external_data(
         return Ok(());
     }
 
-    let candidates = find_symbol_candidates(o, pointer);
+    let candidates = find_symbol_candidates(o.modules, o.symbol_maps, o.module_index, pointer);
     if candidates.is_empty() {
         // Probably not a pointer
         return Ok(());
@@ -229,19 +288,20 @@ fn find_external_data(
 }
 
 fn find_symbol_candidates(
-    options: &mut AnalyzeExternalReferencesOptions,
+    modules: &[Module],
+    symbol_maps: &SymbolMaps,
+    module_index: usize,
     pointer: u32,
 ) -> Vec<SymbolCandidate> {
-    options
-        .modules
+    modules
         .iter()
         .enumerate()
         .filter_map(|(index, module)| {
-            if index == options.module_index {
+            if index == module_index {
                 return None;
             }
             let (section_index, section) = module.sections().get_by_contained_address(pointer)?;
-            let symbol_map = options.symbol_maps.get(module.kind()).unwrap();
+            let symbol_map = symbol_maps.get(module.kind()).unwrap();
             if section.kind() == SectionKind::Code {
                 let (_, symbol) = symbol_map.by_address(pointer & !1).unwrap()?;
                 let symbol_is_thumb = match &symbol.kind {

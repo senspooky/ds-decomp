@@ -7,7 +7,7 @@ use std::{
 };
 
 use ds_rom::{
-    crypto::dsprot::{self, DsProtDecryptOptions, DsProtDecryptResult},
+    crypto::dsprot::{self, DsProtDecryptOptions, DsProtDecryptResult, DsProtRelocation},
     rom::{
         Arm9, Arm9DsProtInfoError, Autoload, Overlay, OverlayDsProtError,
         raw::{AutoloadKind, RawBuildInfoError},
@@ -59,6 +59,10 @@ pub struct Module {
     pub default_sinit_prefix: String,
     sections: Sections,
     signed: bool,
+    /// DS Protect relocations whose destination is outside this module's address space. They can
+    /// only be resolved once every module has been analyzed, see
+    /// [`Self::pending_dsprot_relocations`].
+    pending_dsprot_relocations: Vec<DsProtRelocation>,
 }
 
 #[derive(Debug, Snafu)]
@@ -112,10 +116,6 @@ pub enum ModuleError {
     OverlayDsProt { source: OverlayDsProtError },
     #[snafu(transparent)]
     Relocations { source: RelocationsError },
-    #[snafu(display(
-        "The DS Protect relocation from {from:#010x} points to {to:#010x} which is outside of this module's address space:\n{backtrace}"
-    ))]
-    InvalidDsProtReloc { from: u32, to: u32, backtrace: Backtrace },
 }
 
 pub const ENTRY_FN_SYMBOL_NAME: &str = "Entry";
@@ -170,6 +170,7 @@ impl Module {
             default_sinit_prefix,
             sections,
             signed,
+            pending_dsprot_relocations: vec![],
         })
     }
 
@@ -200,6 +201,7 @@ impl Module {
             default_sinit_prefix: "__sinit_".to_string(),
             sections,
             signed: false,
+            pending_dsprot_relocations: vec![],
         })
     }
 
@@ -238,6 +240,7 @@ impl Module {
             default_sinit_prefix: "__sinit_".to_string(),
             sections: Sections::new(),
             signed: false,
+            pending_dsprot_relocations: vec![],
         };
         let symbol_map = symbol_maps.get_mut(module.kind);
 
@@ -302,6 +305,7 @@ impl Module {
             default_sinit_prefix: format!("__sinit_ov{id:03}_"),
             sections,
             signed,
+            pending_dsprot_relocations: vec![],
         })
     }
 
@@ -335,6 +339,7 @@ impl Module {
             default_sinit_prefix: format!("__sinit_ov{:03}_", overlay.id()),
             sections: Sections::new(),
             signed: overlay.originally_signed(),
+            pending_dsprot_relocations: vec![],
         };
         let symbol_map = symbol_maps.get_mut(module.kind);
 
@@ -382,6 +387,7 @@ impl Module {
             default_sinit_prefix: "__sinit_".to_string(),
             sections,
             signed: false,
+            pending_dsprot_relocations: vec![],
         })
     }
 
@@ -402,6 +408,7 @@ impl Module {
             default_sinit_prefix: "__sinit_".to_string(),
             sections: Sections::new(),
             signed: false,
+            pending_dsprot_relocations: vec![],
         };
         let symbol_map = symbol_maps.get_mut(module.kind);
 
@@ -429,6 +436,7 @@ impl Module {
             default_sinit_prefix: "__sinit_".to_string(),
             sections: Sections::new(),
             signed: false,
+            pending_dsprot_relocations: vec![],
         };
         let symbol_map = symbol_maps.get_mut(module.kind);
 
@@ -458,6 +466,7 @@ impl Module {
             default_sinit_prefix: "__sinit_".to_string(),
             sections: Sections::new(),
             signed: false,
+            pending_dsprot_relocations: vec![],
         };
         let symbol_map = symbol_maps.get_mut(module.kind);
 
@@ -1347,14 +1356,19 @@ impl Module {
             );
 
             // Add relocation and destination symbol
-            let (_, section) =
-                self.sections.get_by_contained_address(relocation.to_address).ok_or_else(|| {
-                    InvalidDsProtRelocSnafu {
-                        from: relocation.from_address,
-                        to: relocation.to_address,
-                    }
-                    .build()
-                })?;
+            let Some((_, section)) = self.sections.get_by_contained_address(relocation.to_address)
+            else {
+                // DS Protect can also relocate pointers to other modules, which can only be
+                // resolved once every module has been analyzed.
+                log::debug!(
+                    "Deferring DS Protect relocation from {:#010x} in {} to {:#010x} as it points outside this module",
+                    relocation.from_address,
+                    self.kind,
+                    relocation.to_address
+                );
+                self.pending_dsprot_relocations.push(relocation);
+                continue;
+            };
             let symbol_name = format!("{}{:08x}", self.default_data_prefix, relocation.to_address);
             match section.kind() {
                 SectionKind::Code => {}
@@ -1387,6 +1401,13 @@ impl Module {
 
     pub fn relocations_mut(&mut self) -> &mut Relocations {
         &mut self.relocations
+    }
+
+    /// DS Protect relocations pointing outside this module's address space. Since overlays share
+    /// address space, the destination module can only be resolved by looking at every module in the
+    /// program, which is not possible while analyzing a single module.
+    pub fn pending_dsprot_relocations(&self) -> &[DsProtRelocation] {
+        &self.pending_dsprot_relocations
     }
 
     pub fn sections(&self) -> &Sections {
