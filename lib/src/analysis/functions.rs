@@ -17,7 +17,7 @@ use super::{
     function_branch::FunctionBranchState,
     function_start::is_valid_function_start,
     illegal_code::IllegalCodeState,
-    inline_table::{InlineTable, InlineTableState},
+    inline_table::{InlineTable, InlineTableKind, InlineTableState},
     jump_table::{JumpTable, JumpTableState},
     secure_area::SecureAreaState,
 };
@@ -1092,6 +1092,15 @@ impl<'a> ParseFunctionContext<'a> {
             self.inline_tables.insert(table.address, table);
         }
 
+        if let Some(table) = self.pool_pointer_inline_table(address, parsed_ins) {
+            log::debug!(
+                "Inline table found at {:#x}, size {:#x}, from a pointer in the constant pool",
+                table.address,
+                table.size
+            );
+            self.inline_tables.insert(table.address, table);
+        }
+
         if let Some(called_function) =
             Function::is_function_call(ins, parsed_ins, address, self.thumb)
         {
@@ -1268,6 +1277,55 @@ impl<'a> ParseFunctionContext<'a> {
         }
 
         None
+    }
+
+    /// Detects a data table in the function's constant pool which is reached through a pointer in
+    /// that same pool, e.g.
+    ///
+    /// ```txt
+    ///     ldr r0, _table_pointer
+    ///     ldrb r1, [r0, r2]
+    ///     ...
+    ///     bx lr
+    /// _table:
+    ///     .byte ...
+    /// _table_pointer:
+    ///     .word _table
+    /// ```
+    ///
+    /// No instruction points directly at `_table`, so it is not found as a pool constant and would
+    /// be disassembled as code.
+    fn pool_pointer_inline_table(
+        &self,
+        address: u32,
+        parsed_ins: &ParsedIns,
+    ) -> Option<InlineTable> {
+        if parsed_ins.mnemonic != "ldrb" {
+            return None;
+        }
+        let Argument::Reg(Reg { reg, deref: true, .. }) = parsed_ins.args[1] else {
+            return None;
+        };
+        let Some((table_address, RegValueSrc::PoolConstant(pointer_address))) =
+            self.register_values[reg as usize]
+        else {
+            return None;
+        };
+        // The table must come after the instruction reading it and before the pool constant which
+        // points to it, so that it is inside the function's trailing constant pool
+        if table_address <= address || table_address >= pointer_address {
+            return None;
+        }
+        // The table ends where the next pool constant begins
+        let (&table_end, _) = self.pool_constants.range(table_address..).next()?;
+        if table_end <= table_address {
+            return None;
+        }
+        Some(InlineTable {
+            address: table_address,
+            size: table_end - table_address,
+            kind: InlineTableKind::Byte,
+        })
     }
 
     fn is_long_branch_destination(&self, address: u32) -> bool {
