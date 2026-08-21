@@ -270,6 +270,13 @@ pub struct SymbolLookup<'a> {
 }
 
 impl SymbolLookup<'_> {
+    /// Whether the word at `address` is the target of a relocation which applies to data, and
+    /// therefore cannot be an instruction.
+    pub fn has_data_relocation(&self, address: u32) -> bool {
+        let Some(relocations) = self.relocations else { return false };
+        relocations.get(address).is_some_and(|relocation| relocation.kind() == RelocationKind::Load)
+    }
+
     pub fn write_symbol<W: io::Write>(
         &self,
         w: &mut W,

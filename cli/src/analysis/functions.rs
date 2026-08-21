@@ -10,7 +10,10 @@ use ds_decomp::{
 };
 use unarm::{ArmVersion, DisplayOptions, Endian, ParseFlags, ParseMode, Parser, RegNames};
 
-use crate::config::symbol::{SymDataExt, SymbolLookup};
+use crate::{
+    config::symbol::{SymDataExt, SymbolLookup},
+    util::bytes::FromSlice,
+};
 
 pub trait FunctionExt {
     fn write_assembly<W: io::Write>(
@@ -92,6 +95,15 @@ impl FunctionExt for Function {
                 jump_table = None;
             }
 
+            // A `load` relocation applies to a data word, never to an instruction. If one turns up
+            // where an instruction was expected, the word is data which no instruction in the
+            // function loads, so it was never found as a pool constant. DS Protect leaves such data
+            // in the constant pool of the functions it protects.
+            let data_word = jump_table.is_none()
+                && parser.mode != ParseMode::Data
+                && symbols.has_data_relocation(address);
+            let ins_size = if data_word { 4 } else { ins_size };
+
             // write instruction
             match jump_table {
                 Some((SymJumpTable { kind: JumpTableKind::Thumb { kind, jump }, .. }, sym)) => {
@@ -129,6 +141,14 @@ impl FunctionExt for Function {
                             write_jump_table_case(w, jump_table, 1, address + 1)?;
                         }
                     }
+                }
+                _ if data_word => {
+                    let start = (address - base_address) as usize;
+                    let value = u32::from_le_slice(&module_code[start..]);
+                    if !symbols.write_symbol(w, address, value, &mut false, "    ")? {
+                        writeln!(w, "    .word {value:#x}")?;
+                    }
+                    parser.seek_forward(address + 4);
                 }
                 _ => {
                     if parser.mode != ParseMode::Data {
