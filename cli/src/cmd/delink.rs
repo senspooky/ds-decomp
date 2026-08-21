@@ -385,7 +385,7 @@ impl<'a> DelinkObject<'a> {
                 )
             {
                 // Create mapping symbol
-                if let Some(name) = symbol.mapping_symbol_name() {
+                if let Some(name) = symbol.mapping_symbol_name(file_section.kind()) {
                     self.object.add_symbol(object::write::Symbol {
                         name: name.to_string().into_bytes(),
                         value,

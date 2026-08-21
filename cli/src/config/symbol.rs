@@ -7,6 +7,7 @@ use ds_decomp::{
         Comments,
         module::ModuleKind,
         relocations::{RelocationKind, Relocations},
+        section::SectionKind,
         symbol::{
             InstructionMode, SymData, SymFunction, SymLabel, Symbol, SymbolKind, SymbolMap,
             SymbolMaps, SymbolScope,
@@ -112,7 +113,7 @@ impl SymbolMapsExt for SymbolMaps {
 pub enum SymbolMapContainsError {}
 
 pub trait SymbolExt {
-    fn mapping_symbol_name(&self) -> Option<&str>;
+    fn mapping_symbol_name(&self, section_kind: SectionKind) -> Option<&str>;
 
     fn get_obj_symbol_scope(&self) -> object::SymbolScope;
     fn get_obj_symbol_flags(
@@ -121,9 +122,18 @@ pub trait SymbolExt {
 }
 
 impl SymbolExt for Symbol {
-    fn mapping_symbol_name(&self) -> Option<&str> {
+    fn mapping_symbol_name(&self, section_kind: SectionKind) -> Option<&str> {
         match self.kind {
             SymbolKind::Undefined => None,
+            // A mapping symbol claims everything up to the next one, so an unknown function - which
+            // has no size - would claim the data after it as code. In a data section that makes the
+            // linker generate interworking veneers for pointers to ARM functions, and those veneers
+            // are appended to the section, displacing every section after it.
+            SymbolKind::Function(SymFunction { unknown: true, size: 0, .. })
+                if section_kind != SectionKind::Code =>
+            {
+                Some("$d")
+            }
             SymbolKind::Function(SymFunction { mode, .. })
             | SymbolKind::Label(SymLabel { mode, .. }) => match mode {
                 InstructionMode::Arm => Some("$a"),
