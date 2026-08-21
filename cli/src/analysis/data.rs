@@ -204,6 +204,21 @@ fn add_function_calls_as_relocations(
                     return false;
                 };
 
+                if symbol.scope.is_local() {
+                    // Existing symbol is local, so it can't be referred to by a relocation. This
+                    // happens for an external label, which is only made external so that it gets
+                    // written to symbols.txt, and stays local because it is a branch target inside
+                    // one of its own module's functions.
+                    log::debug!(
+                        "Not calling {} at {:#010x} in {} from {address:#010x} in {} as it is local",
+                        symbol.name,
+                        called_function.address,
+                        module.kind(),
+                        modules[*module_index].kind()
+                    );
+                    return false;
+                }
+
                 let mode = match &symbol.kind {
                     SymbolKind::Function(SymFunction { mode, .. })
                     | SymbolKind::Label(SymLabel { external: true, mode }) => mode,
