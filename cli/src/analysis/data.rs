@@ -18,7 +18,9 @@ pub struct AnalyzeExternalReferencesOptions<'a> {
 #[derive(Debug, Snafu)]
 pub enum AnalyzeExternalReferencesError {
     #[snafu(display(
-        "Failed to add relocation for local function call from {from:#010x} in {module_kind} to {to:#010x} as it leads to no function"
+        "Failed to add relocation for local function call from {from:#010x} in {module_kind} to {to:#010x} as it leads to no function. \
+         The destination may be encrypted or otherwise missed by function analysis; pass \
+         --allow-unknown-function-calls to generate a function symbol for it instead"
     ))]
     LocalFunctionNotFound { from: u32, to: u32, module_kind: ModuleKind },
     #[snafu(display(
