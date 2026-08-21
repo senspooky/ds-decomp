@@ -1322,15 +1322,19 @@ impl Module {
         options: &AnalysisOptions,
     ) -> Result<(), ModuleError> {
         if let Some(bss_variable) = dsprot_result.bss_variable {
-            if symbol_map.by_address(bss_variable)?.is_some() {
+            // Every module with DS Protect has its own BSS variable, and they all get the same
+            // name. The scope must therefore be local, or the linker sees one definition per
+            // module and fails with a multiply-defined symbol.
+            if let Some((symbol_id, _)) = symbol_map.by_address(bss_variable)? {
                 symbol_map.rename_by_address(bss_variable, DSPROT_BSS_SYMBOL_NAME)?;
+                symbol_map.get_mut(symbol_id).unwrap().scope = SymbolScope::Local;
             } else {
                 symbol_map.add(Symbol {
                     name: DSPROT_BSS_SYMBOL_NAME.to_string(),
                     kind: SymbolKind::Bss(SymBss { size: None }),
                     addr: bss_variable,
                     ambiguous: false,
-                    scope: SymbolScope::Global,
+                    scope: SymbolScope::Local,
                     skip: false,
                     comments: Comments::new(),
                 });
