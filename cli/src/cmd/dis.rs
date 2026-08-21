@@ -142,6 +142,10 @@ impl Disassemble {
                 relocations: Some(module.relocations()),
             };
 
+            // End of the function which was written last. Functions are written in full, including
+            // the inline tables inside them, so a data symbol inside one has already been written.
+            let mut function_end = section.start_address();
+
             let mut symbol_iter = symbol_map.iter_by_address(section.address_range()).peekable();
             while let Some((_, symbol)) = symbol_iter.next() {
                 debug_assert!(
@@ -206,9 +210,15 @@ impl Disassemble {
                                 self.ual,
                             )?;
                             offset = function.end_address() - section.start_address();
+                            function_end = function.end_address();
                         }
                     }
                     SymbolKind::Data(data) => {
+                        if symbol.addr < function_end {
+                            // Already written as an inline table inside the function
+                            continue;
+                        }
+
                         let start = (symbol.addr - section.start_address()) as usize;
 
                         let size = data.size().unwrap_or_else(|| {
