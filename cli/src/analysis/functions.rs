@@ -79,6 +79,25 @@ impl FunctionExt for Function {
             }
 
             'ins: {
+                // A constant pool the function's own code sits after is emitted by the scan at the
+                // bottom of this loop, which starts from the instruction just written. A function
+                // whose start was moved back onto a pool ahead of its code has no such instruction
+                // for its first constant, so that one has to be written here or it comes out as a
+                // `.word #0x...` pseudo-instruction with no label on it -- as the SHA-1 round
+                // constant at 0x02077cd4 in ARM9 main did.
+                if let Some(pool_symbol) = symbols.symbol_map.get_pool_constant(address)?
+                    && self.pool_constants().contains_key(&address)
+                {
+                    let start = (address - base_address) as usize;
+                    let const_value = u32::from_le_slice(&module_code[start..]);
+                    write!(w, "{}: ", pool_symbol.name)?;
+                    if !symbols.write_symbol(w, address, const_value, &mut false, "")? {
+                        writeln!(w, ".word {const_value:#x}")?;
+                    }
+                    ins_size = 4;
+                    break 'ins;
+                }
+
                 // write data
                 if let Some((data, sym)) = symbols.symbol_map.get_data(address)? {
                     let Some(size) = data.size() else {
