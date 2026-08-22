@@ -1458,6 +1458,9 @@ impl Module {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum ModuleKind {
     Arm9,
+    /// The DSi-exclusive ARM9i program. It is not built by dsd; it exists so that relocations from
+    /// built modules can name a symbol in its address space. See [`crate::config::config::ConfigExternModule`].
+    Arm9i,
     Overlay(u16),
     Autoload(AutoloadKind),
 }
@@ -1466,6 +1469,7 @@ impl Display for ModuleKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ModuleKind::Arm9 => write!(f, "ARM9 main"),
+            ModuleKind::Arm9i => write!(f, "ARM9i"),
             ModuleKind::Overlay(index) => write!(f, "overlay {index}"),
             ModuleKind::Autoload(kind) => match kind {
                 AutoloadKind::Itcm => write!(f, "ITCM"),

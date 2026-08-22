@@ -43,8 +43,9 @@ impl SectionExt for Section {
                     &[0xfe, 0xff, 0xff, 0xeb] // bl #0
                 }
                 RelocationKind::ArmCallThumb => {
-                    // R_ARM_XPC25
-                    &[0xfe, 0xff, 0xff, 0xeb] // bl #0
+                    // R_ARM_XPC25. mwld takes the mode switch from the instruction rather than
+                    // from the destination symbol, so this has to be a BLX and not a BL.
+                    &[0xfe, 0xff, 0xff, 0xfa] // blx #0
                 }
                 RelocationKind::ThumbCall => {
                     // R_ARM_THM_PC22

@@ -357,6 +357,7 @@ impl Relocation {
             RelocationModule::Overlay { id } => Some(ModuleKind::Overlay(*id)),
             RelocationModule::Overlays { .. } => None,
             RelocationModule::Main => Some(ModuleKind::Arm9),
+            RelocationModule::Arm9i => Some(ModuleKind::Arm9i),
             RelocationModule::Itcm => Some(ModuleKind::Autoload(AutoloadKind::Itcm)),
             RelocationModule::Dtcm => Some(ModuleKind::Autoload(AutoloadKind::Dtcm)),
             RelocationModule::Autoload { index } => {
@@ -493,6 +494,7 @@ pub enum RelocationModule {
     Overlay { id: u16 },
     Overlays { ids: Vec<u16> },
     Main,
+    Arm9i,
     Itcm,
     Dtcm,
     Autoload { index: u32 },
@@ -548,6 +550,12 @@ impl RelocationModule {
 
         let module_kind = first.kind();
         match module_kind {
+            ModuleKind::Arm9i => {
+                if modules.next().is_some() {
+                    return AmbiguousNonOverlayRelocationSnafu { module_kind }.fail();
+                }
+                Ok(Self::Arm9i)
+            }
             ModuleKind::Arm9 => {
                 if modules.next().is_some() {
                     return AmbiguousNonOverlayRelocationSnafu { module_kind }.fail();
@@ -627,6 +635,15 @@ impl RelocationModule {
                     ))
                 }
             }
+            "arm9i" => {
+                if options.is_empty() {
+                    Ok(Self::Arm9i)
+                } else {
+                    Err(Box::new(
+                        UnexpectedOptionsSnafu { context, module: "arm9i", options }.build(),
+                    ))
+                }
+            }
             "itcm" => {
                 if options.is_empty() {
                     Ok(Self::Itcm)
@@ -666,6 +683,7 @@ impl RelocationModule {
                 }
             }
             RelocationModule::Main => module == ModuleKind::Arm9,
+            RelocationModule::Arm9i => module == ModuleKind::Arm9i,
             RelocationModule::Itcm => module == ModuleKind::Autoload(AutoloadKind::Itcm),
             RelocationModule::Dtcm => module == ModuleKind::Autoload(AutoloadKind::Dtcm),
             RelocationModule::Autoload { index } => {
@@ -697,6 +715,7 @@ impl From<ModuleKind> for RelocationModule {
     fn from(value: ModuleKind) -> Self {
         match value {
             ModuleKind::Arm9 => Self::Main,
+            ModuleKind::Arm9i => Self::Arm9i,
             ModuleKind::Overlay(id) => Self::Overlay { id },
             ModuleKind::Autoload(kind) => match kind {
                 AutoloadKind::Itcm => Self::Itcm,
@@ -721,6 +740,7 @@ impl Display for RelocationModule {
                 Ok(())
             }
             RelocationModule::Main => write!(f, "main"),
+            RelocationModule::Arm9i => write!(f, "arm9i"),
             RelocationModule::Itcm => write!(f, "itcm"),
             RelocationModule::Dtcm => write!(f, "dtcm"),
             RelocationModule::Autoload { index } => write!(f, "autoload({index})"),

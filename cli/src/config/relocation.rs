@@ -7,7 +7,7 @@ use ds_decomp::config::{
     relocations::{RelocationKind, RelocationModule, Relocations},
 };
 use ds_rom::rom::raw::AutoloadKind;
-use object::elf::{R_ARM_ABS32, R_ARM_PC24, R_ARM_THM_PC22};
+use object::elf::{R_ARM_ABS32, R_ARM_PC24, R_ARM_THM_PC22, R_ARM_XPC25};
 
 pub trait RelocationKindExt: Sized {
     fn as_obj_symbol_kind(&self) -> object::SymbolKind;
@@ -33,7 +33,11 @@ impl RelocationKindExt for RelocationKind {
         match self {
             Self::ArmCall => R_ARM_PC24,
             Self::ThumbCall => R_ARM_THM_PC22,
-            Self::ArmCallThumb => R_ARM_PC24,
+            // The ARM-to-Thumb call relocation, which is what mwasmarm emits for `blx <label>`.
+            // With plain PC24 the linker infers the callee's mode from the mapping symbol of the
+            // section the destination lands in; an absolute symbol -- an extern module's -- has no
+            // section, so it assumes ARM and leaves the instruction a BL.
+            Self::ArmCallThumb => R_ARM_XPC25,
             // Bug in mwld thinks that the range of XPC22 is only +-2MB, but it should be +-4MB. Fortunately we can use PC22 as
             // it has the correct range, and the linker resolves BL instructions to BLX automatically anyway.
             Self::ThumbCallArm => R_ARM_THM_PC22,
@@ -46,6 +50,7 @@ impl RelocationKindExt for RelocationKind {
 
     fn from_elf_relocation_type(r_type: u32, dest_thumb: bool, is_branch: bool) -> Option<Self> {
         match r_type {
+            R_ARM_XPC25 => Some(Self::ArmCallThumb),
             R_ARM_PC24 => {
                 if is_branch {
                     Some(Self::ArmBranch)
@@ -87,6 +92,7 @@ impl RelocationModuleExt for RelocationModule {
             RelocationModule::Overlays { ids } => Some(ModuleKind::Overlay(*ids.first().unwrap())),
             RelocationModule::Overlay { id } => Some(ModuleKind::Overlay(*id)),
             RelocationModule::Main => Some(ModuleKind::Arm9),
+            RelocationModule::Arm9i => Some(ModuleKind::Arm9i),
             RelocationModule::Itcm => Some(ModuleKind::Autoload(AutoloadKind::Itcm)),
             RelocationModule::Dtcm => Some(ModuleKind::Autoload(AutoloadKind::Dtcm)),
             RelocationModule::Autoload { index } => {
@@ -104,6 +110,7 @@ impl RelocationModuleExt for RelocationModule {
             RelocationModule::None => None,
             RelocationModule::Overlay { .. } => None,
             RelocationModule::Main => None,
+            RelocationModule::Arm9i => None,
             RelocationModule::Itcm => None,
             RelocationModule::Dtcm => None,
             RelocationModule::Autoload { .. } => None,

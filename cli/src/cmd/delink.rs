@@ -142,6 +142,8 @@ impl ModuleFilterArgs {
         }
         match module {
             ModuleKind::Arm9 => self.main,
+            // Extern modules are never disassembled or delinked, so no filter selects them.
+            ModuleKind::Arm9i => false,
             ModuleKind::Overlay(id) => self.overlay.contains(&id),
             ModuleKind::Autoload(AutoloadKind::Itcm) => self.itcm,
             ModuleKind::Autoload(AutoloadKind::Dtcm) => self.dtcm,
@@ -167,6 +169,9 @@ impl<'a> Delinker<'a> {
                 {
                     let section_end = match migrate_section.module_kind() {
                         ModuleKind::Arm9 => self.rom.arm9().end_address()?,
+                        ModuleKind::Arm9i => {
+                            bail!("Cannot migrate a section into an extern module")
+                        }
                         ModuleKind::Overlay(id) => {
                             self.rom.arm7_overlays()[id as usize].end_address()
                         }

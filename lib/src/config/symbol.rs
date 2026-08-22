@@ -77,6 +77,9 @@ impl SymbolMaps {
                 .get_mut(ModuleKind::Overlay(overlay.id))
                 .load(config_path.join(&overlay.module.symbols))?;
         }
+        for (module_kind, extern_module) in config.iter_extern_modules() {
+            symbol_maps.get_mut(module_kind).load(config_path.join(&extern_module.symbols))?;
+        }
 
         Ok(symbol_maps)
     }
@@ -101,6 +104,11 @@ impl SymbolMaps {
             self.get(module)
                 .ok_or_else(|| SymbolMapNotFoundSnafu { module }.build())?
                 .to_file(config_path.join(&overlay.module.symbols))?;
+        }
+        for (module, extern_module) in config.iter_extern_modules() {
+            self.get(module)
+                .ok_or_else(|| SymbolMapNotFoundSnafu { module }.build())?
+                .to_file(config_path.join(&extern_module.symbols))?;
         }
 
         Ok(())

@@ -29,6 +29,9 @@ impl RomExt for Rom<'_> {
     fn get_code(&self, kind: ModuleKind) -> Result<Cow<'_, [u8]>, RomGetCodeError> {
         match kind {
             ModuleKind::Arm9 => Ok(self.arm9().code()?.into()),
+            // Extern modules are not built from the ROM's code, only named. `Config::load_module`
+            // is never called for them.
+            ModuleKind::Arm9i => Err(RomGetCodeError::ModuleNotFound { module_kind: kind }),
             ModuleKind::Overlay(id) => Ok(self
                 .arm9_overlays()
                 .get(id as usize)
