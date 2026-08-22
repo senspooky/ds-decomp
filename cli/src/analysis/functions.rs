@@ -62,7 +62,12 @@ impl FunctionExt for Function {
                 writeln!(w, "{}: ; {:#010x}", self.name(), self.first_instruction_address())?;
             }
 
-            let mut ins_size = parser.mode.instruction_size(0) as u32;
+            // How far the parser actually advanced, which is the only thing that knows a Thumb
+            // `bl`/`blx` pair is four bytes -- `ParseMode::Thumb.instruction_size` always answers
+            // two. Getting this wrong moves the address the constant pool is looked for at, and a
+            // pool that starts directly after a Thumb `bl` is then disassembled as code with no
+            // label on it, leaving the `ldr` that loads it pointing at nothing.
+            let mut ins_size = parser.address - address;
 
             // write label
             if let Some(label) = symbols.symbol_map.get_label(address)? {
