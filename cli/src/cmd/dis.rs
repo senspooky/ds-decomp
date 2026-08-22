@@ -219,7 +219,21 @@ impl Disassemble {
                             continue;
                         }
 
+                        let code = code.with_context(|| {
+                            format!(
+                                "No code to dump for data at {:#010x} in {}",
+                                symbol.addr,
+                                module.kind()
+                            )
+                        })?;
+
                         let start = (symbol.addr - section.start_address()) as usize;
+                        if offset < start as u32 {
+                            // Bytes with no symbol of their own, such as the body of an unknown
+                            // function or the start of a section
+                            Self::dump_bytes(code, offset, start as u32, writer)?;
+                            writeln!(writer)?;
+                        }
 
                         let size = data.size().unwrap_or_else(|| {
                             Self::size_to_next_symbol(
@@ -230,7 +244,7 @@ impl Disassemble {
                         });
 
                         let end = start + size as usize;
-                        let bytes = &code.unwrap()[start..end];
+                        let bytes = &code[start..end];
                         write!(writer, "{}:", symbol.name)?;
 
                         if symbol.ambiguous {
