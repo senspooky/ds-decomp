@@ -56,7 +56,6 @@ impl CheckSymbols {
         let delinks_map = DelinksMap::from_config(&config, config_path, DelinksMapOptions {
             migrate_sections: false,
             generate_gap_files: false,
-            module_filter: self.module_filter.build(),
         })?;
         if self.module_filter.has(ModuleKind::Arm9)
             && let Some(target_symbols) = symbol_maps.get(ModuleKind::Arm9)
