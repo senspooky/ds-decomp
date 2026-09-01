@@ -111,7 +111,12 @@ impl ModuleFilterArgs {
         if self.main {
             module_filter.push(ModuleKind::Arm9);
         }
-        module_filter.extend(self.overlay.iter().map(|&id| ModuleKind::Overlay(id)));
+        module_filter.extend(
+            self.overlay
+                .iter()
+                .filter(|&id| self.overlay.contains(id))
+                .map(|&id| ModuleKind::Overlay(id)),
+        );
         if self.itcm {
             module_filter.push(ModuleKind::Autoload(AutoloadKind::Itcm));
         }
@@ -119,7 +124,10 @@ impl ModuleFilterArgs {
             module_filter.push(ModuleKind::Autoload(AutoloadKind::Dtcm));
         }
         module_filter.extend(
-            self.autoload.iter().map(|&index| ModuleKind::Autoload(AutoloadKind::Unknown(index))),
+            self.autoload
+                .iter()
+                .filter(|&index| self.autoload.contains(index))
+                .map(|&index| ModuleKind::Autoload(AutoloadKind::Unknown(index))),
         );
         module_filter
     }
