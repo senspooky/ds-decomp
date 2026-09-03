@@ -13,7 +13,7 @@ use ds_decomp::config::{
     module::ModuleKind,
     relocations::RelocationKind,
     section::{MigrateSection, Section, SectionKind},
-    symbol::{InstructionMode, SymFunction, SymbolKind},
+    symbol::{InstructionMode, SymFunction, SymLabel, SymbolKind},
 };
 use ds_rom::rom::{Rom, raw::AutoloadKind};
 use object::{Architecture, BinaryFormat, Endianness, RelocationFlags};
@@ -379,6 +379,7 @@ impl<'a> DelinkObject<'a> {
             let is_thumb = matches!(
                 symbol.kind,
                 SymbolKind::Function(SymFunction { mode: InstructionMode::Thumb, .. })
+                    | SymbolKind::Label(SymLabel { mode: InstructionMode::Thumb, .. })
             );
             let thumb_bit = if is_thumb { 1 } else { 0 };
             self.obj_symbols.insert((symbol.addr | thumb_bit, symbol_module), symbol_id);
@@ -455,7 +456,8 @@ impl<'a> DelinkObject<'a> {
                     };
 
                     // Get destination symbol
-                    let symbol_key = (dest_addr, reloc_module);
+                    let thumb_bit = if relocation.kind().calls_thumb_fn() { 1 } else { 0 };
+                    let symbol_key = (dest_addr | thumb_bit, reloc_module);
                     if let Some(obj_symbol) = self.obj_symbols.get(&symbol_key) {
                         // Use existing symbol
                         *obj_symbol

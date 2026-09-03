@@ -169,7 +169,9 @@ impl CtorRange {
         };
 
         let num_ctors = ctor_code
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .position(|ctor| ctor == 0)
             .ok_or_else(|| UnterminatedCtorSnafu { address: ctor_start }.build())?;
