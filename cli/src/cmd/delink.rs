@@ -83,7 +83,6 @@ impl Delink {
         let delinks_map = DelinksMap::from_config(&config, config_path, DelinksMapOptions {
             migrate_sections: true,
             generate_gap_files: true,
-            module_filter: self.module_filter.build(),
         })?;
 
         let rom = config.load_rom(config_path)?;
@@ -106,24 +105,6 @@ impl Delink {
 }
 
 impl ModuleFilterArgs {
-    pub fn build(&self) -> Vec<ModuleKind> {
-        let mut module_filter = Vec::new();
-        if self.main {
-            module_filter.push(ModuleKind::Arm9);
-        }
-        module_filter.extend(self.overlay.iter().map(|&id| ModuleKind::Overlay(id)));
-        if self.itcm {
-            module_filter.push(ModuleKind::Autoload(AutoloadKind::Itcm));
-        }
-        if self.dtcm {
-            module_filter.push(ModuleKind::Autoload(AutoloadKind::Dtcm));
-        }
-        module_filter.extend(
-            self.autoload.iter().map(|&index| ModuleKind::Autoload(AutoloadKind::Unknown(index))),
-        );
-        module_filter
-    }
-
     pub fn all() -> Self {
         Self::default()
     }
