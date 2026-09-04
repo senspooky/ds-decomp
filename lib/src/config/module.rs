@@ -820,14 +820,16 @@ impl Module {
         // .ctor and .init
         let (read_only_end, rodata_start) = if let Some(ctor) = ctor {
             if let Some(init_functions) = self.add_ctor_section(ctor, symbol_map)? {
-                if let Some(init_range) = self.add_init_section(symbol_map, AddInitSectionOptions {
-                    ctor,
-                    init_functions,
-                    continuous: false,
-                    overriden_function_sizes,
-                    dsprot_encrypted_functions,
-                    dsprot_encrypted_ranges,
-                })? {
+                if let Some(init_range) =
+                    self.add_init_section(symbol_map, AddInitSectionOptions {
+                        ctor,
+                        init_functions,
+                        continuous: false,
+                        overriden_function_sizes,
+                        dsprot_encrypted_functions,
+                        dsprot_encrypted_ranges,
+                    })?
+                {
                     (init_range.0, Some(init_range.1))
                 } else {
                     (ctor.start, None)

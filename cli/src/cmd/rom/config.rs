@@ -642,10 +642,7 @@ padding:
         assert_eq!(dsi.arm9i_config, PathBuf::from("../extract/dsi/arm9i.yaml"));
         assert_eq!(dsi.arm7i_bin, PathBuf::from("../extract/dsi/arm7i.bin"));
         assert_eq!(dsi.arm7i_config, PathBuf::from("../extract/dsi/arm7i.yaml"));
-        assert_eq!(
-            dsi.region_padding,
-            PathBuf::from("../extract/dsi/region_padding.bin")
-        );
+        assert_eq!(dsi.region_padding, PathBuf::from("../extract/dsi/region_padding.bin"));
     }
 
     /// DS-only ROMs have no DSi area, and must not gain one.
