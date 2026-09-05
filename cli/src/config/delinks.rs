@@ -271,6 +271,7 @@ impl DelinkFileExt for DelinkFile {
     fn new_gap(module_kind: ModuleKind, id: usize) -> Result<Self> {
         let name = match module_kind {
             ModuleKind::Arm9 => format!("{GAP_FILE_PREFIX}main_{id}"),
+            ModuleKind::Arm9i => bail!("Extern module {module_kind} has no delink files"),
             ModuleKind::Overlay(overlay_id) => format!("{GAP_FILE_PREFIX}ov{overlay_id:03}_{id}"),
             ModuleKind::Autoload(kind) => match kind {
                 AutoloadKind::Itcm => format!("{GAP_FILE_PREFIX}itcm_{id}"),

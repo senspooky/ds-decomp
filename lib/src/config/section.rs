@@ -547,6 +547,8 @@ impl MigrateSection {
     pub fn sections_to_migrate(module_kind: ModuleKind) -> Vec<MigrateSection> {
         match module_kind {
             ModuleKind::Arm9 => vec![],
+            // Extern modules have no sections at all, so nothing can migrate into them.
+            ModuleKind::Arm9i => vec![],
             ModuleKind::Overlay(_) => vec![],
             ModuleKind::Autoload(AutoloadKind::Dtcm) => vec![MigrateSection::Dtcm],
             ModuleKind::Autoload(AutoloadKind::Itcm) => vec![MigrateSection::Itcm],

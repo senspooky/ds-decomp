@@ -10,7 +10,10 @@ use ds_decomp::{
 };
 use unarm::{ArmVersion, DisplayOptions, Endian, ParseFlags, ParseMode, Parser, RegNames};
 
-use crate::config::symbol::{SymDataExt, SymbolLookup};
+use crate::{
+    config::symbol::{SymDataExt, SymbolLookup},
+    util::bytes::FromSlice,
+};
 
 pub trait FunctionExt {
     fn write_assembly<W: io::Write>(
@@ -59,7 +62,12 @@ impl FunctionExt for Function {
                 writeln!(w, "{}: ; {:#010x}", self.name(), self.first_instruction_address())?;
             }
 
-            let ins_size = parser.mode.instruction_size(0) as u32;
+            // How far the parser actually advanced, which is the only thing that knows a Thumb
+            // `bl`/`blx` pair is four bytes -- `ParseMode::Thumb.instruction_size` always answers
+            // two. Getting this wrong moves the address the constant pool is looked for at, and a
+            // pool that starts directly after a Thumb `bl` is then disassembled as code with no
+            // label on it, leaving the `ldr` that loads it pointing at nothing.
+            let mut ins_size = parser.address - address;
 
             // write label
             if let Some(label) = symbols.symbol_map.get_label(address)? {
@@ -70,91 +78,132 @@ impl FunctionExt for Function {
                 writeln!(w, "{}: ; jump table", sym.name)?;
             }
 
-            // write data
-            if let Some((data, sym)) = symbols.symbol_map.get_data(address)? {
-                let Some(size) = data.size() else {
-                    log::error!("Inline tables must have a known size");
-                    bail!("Inline tables must have a known size");
-                };
-                parser.seek_forward(address + size);
-
-                writeln!(w, "{}: ; inline table", sym.name)?;
-
-                let start = (sym.addr - base_address) as usize;
-                let end = start + size as usize;
-                let bytes = &module_code[start..end];
-                data.write_assembly(w, sym, bytes, symbols)?;
-                continue;
-            }
-
-            // possibly terminate jump table
-            if jump_table.is_some_and(|(table, sym)| address >= sym.addr + table.size) {
-                jump_table = None;
-            }
-
-            // write instruction
-            match jump_table {
-                Some((SymJumpTable { kind: JumpTableKind::Thumb { kind, jump }, .. }, sym)) => {
-                    match kind {
-                        ThumbJumpTableKind::Halfword => {
-                            let value = i32::from(ins.code() as i16);
-                            write_numerical_jump_table_entry(
-                                w, symbols, sym, value, ".short", address, jump,
-                            )?;
-                        }
-                        ThumbJumpTableKind::Byte => {
-                            let code = ins.code() as i16;
-                            let [first_value, second_value] = code.to_le_bytes();
-                            let first_value = first_value as i8 as i32;
-                            let second_value = second_value as i8 as i32;
-                            write_numerical_jump_table_entry(
-                                w,
-                                symbols,
-                                sym,
-                                first_value,
-                                ".byte",
-                                address,
-                                jump,
-                            )?;
-                            write_jump_table_case(w, jump_table, 1, address)?;
-                            write_numerical_jump_table_entry(
-                                w,
-                                symbols,
-                                sym,
-                                second_value,
-                                ".byte",
-                                address + 1,
-                                jump,
-                            )?;
-                            write_jump_table_case(w, jump_table, 1, address + 1)?;
-                        }
+            'ins: {
+                // A constant pool the function's own code sits after is emitted by the scan at the
+                // bottom of this loop, which starts from the instruction just written. A function
+                // whose start was moved back onto a pool ahead of its code has no such instruction
+                // for its first constant, so that one has to be written here or it comes out as a
+                // `.word #0x...` pseudo-instruction with no label on it -- as the SHA-1 round
+                // constant at 0x02077cd4 in ARM9 main did.
+                if let Some(pool_symbol) = symbols.symbol_map.get_pool_constant(address)?
+                    && self.pool_constants().contains_key(&address)
+                {
+                    let start = (address - base_address) as usize;
+                    let const_value = u32::from_le_slice(&module_code[start..]);
+                    write!(w, "{}: ", pool_symbol.name)?;
+                    if !symbols.write_symbol(w, address, const_value, &mut false, "")? {
+                        writeln!(w, ".word {const_value:#x}")?;
                     }
+                    ins_size = 4;
+                    break 'ins;
                 }
-                _ => {
-                    if parser.mode != ParseMode::Data {
-                        write!(w, "    ")?;
-                    }
-                    let pc_load_offset = if self.is_thumb() { 4 } else { 8 };
-                    write!(
-                        w,
-                        "{}",
-                        parsed_ins.display_with_symbols(
-                            DisplayOptions {
-                                reg_names: RegNames { ip: true, ..Default::default() }
-                            },
-                            unarm::Symbols {
-                                lookup: symbols,
-                                program_counter: address,
-                                pc_load_offset
+
+                // write data
+                if let Some((data, sym)) = symbols.symbol_map.get_data(address)? {
+                    let Some(size) = data.size() else {
+                        log::error!("Inline tables must have a known size");
+                        bail!("Inline tables must have a known size");
+                    };
+                    parser.seek_forward(address + size);
+
+                    writeln!(w, "{}: ; inline table", sym.name)?;
+
+                    let start = (sym.addr - base_address) as usize;
+                    let end = start + size as usize;
+                    let bytes = &module_code[start..end];
+                    data.write_assembly(w, sym, bytes, symbols)?;
+                    ins_size = size;
+                    break 'ins;
+                }
+
+                // possibly terminate jump table
+                if jump_table.is_some_and(|(table, sym)| address >= sym.addr + table.size) {
+                    jump_table = None;
+                }
+
+                // A `load` relocation applies to a data word, never to an instruction. If one
+                // turns up where an instruction was expected, the word is data which no instruction
+                // in the function loads, so it was never found as a pool constant. DS Protect
+                // leaves such data in the constant pool of the functions it protects.
+                let data_word = jump_table.is_none()
+                    && parser.mode != ParseMode::Data
+                    && symbols.has_data_relocation(address);
+                if data_word {
+                    ins_size = 4;
+                }
+
+                // write instruction
+                match jump_table {
+                    Some((SymJumpTable { kind: JumpTableKind::Thumb { kind, jump }, .. }, sym)) => {
+                        match kind {
+                            ThumbJumpTableKind::Halfword => {
+                                let value = i32::from(ins.code() as i16);
+                                write_numerical_jump_table_entry(
+                                    w, symbols, sym, value, ".short", address, jump,
+                                )?;
                             }
-                        )
-                    )?;
-                    if let Some(reference) =
-                        parsed_ins.pc_relative_reference(address, pc_load_offset)
-                    {
-                        symbols.write_ambiguous_symbols_comment(w, address, reference)?;
+                            ThumbJumpTableKind::Byte => {
+                                let code = ins.code() as i16;
+                                let [first_value, second_value] = code.to_le_bytes();
+                                let first_value = first_value as i8 as i32;
+                                let second_value = second_value as i8 as i32;
+                                write_numerical_jump_table_entry(
+                                    w,
+                                    symbols,
+                                    sym,
+                                    first_value,
+                                    ".byte",
+                                    address,
+                                    jump,
+                                )?;
+                                write_jump_table_case(w, jump_table, 1, address)?;
+                                write_numerical_jump_table_entry(
+                                    w,
+                                    symbols,
+                                    sym,
+                                    second_value,
+                                    ".byte",
+                                    address + 1,
+                                    jump,
+                                )?;
+                                write_jump_table_case(w, jump_table, 1, address + 1)?;
+                            }
+                        }
                     }
-                    write_jump_table_case(w, jump_table, ins_size, address)?;
+                    _ if data_word => {
+                        let start = (address - base_address) as usize;
+                        let value = u32::from_le_slice(&module_code[start..]);
+                        if !symbols.write_symbol(w, address, value, &mut false, "    ")? {
+                            writeln!(w, "    .word {value:#x}")?;
+                        }
+                        parser.seek_forward(address + 4);
+                    }
+                    _ => {
+                        if parser.mode != ParseMode::Data {
+                            write!(w, "    ")?;
+                        }
+                        let pc_load_offset = if self.is_thumb() { 4 } else { 8 };
+                        write!(
+                            w,
+                            "{}",
+                            parsed_ins.display_with_symbols(
+                                DisplayOptions {
+                                    reg_names: RegNames { ip: true, ..Default::default() }
+                                },
+                                unarm::Symbols {
+                                    lookup: symbols,
+                                    program_counter: address,
+                                    pc_load_offset
+                                }
+                            )
+                        )?;
+                        if let Some(reference) =
+                            parsed_ins.pc_relative_reference(address, pc_load_offset)
+                        {
+                            symbols.write_ambiguous_symbols_comment(w, address, reference)?;
+                        }
+                        write_jump_table_case(w, jump_table, ins_size, address)?;
+                    }
                 }
             }
 

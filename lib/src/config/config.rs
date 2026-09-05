@@ -29,6 +29,10 @@ pub struct Config {
     #[serde(skip_serializing_if = "is_false", default)]
     pub enable_dsprot: bool,
     pub main_module: ConfigModule,
+    /// The DSi-exclusive ARM9i program, if this project models it. It is an extern module: dsd
+    /// knows its symbols but does not disassemble, delink, build or check it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arm9i: Option<ConfigExternModule>,
     pub autoloads: Vec<ConfigAutoload>,
     pub overlays: Vec<ConfigOverlay>,
 }
@@ -66,6 +70,8 @@ impl Config {
     pub fn get_module_config_by_kind(&self, module_kind: ModuleKind) -> Option<&ConfigModule> {
         match module_kind {
             ModuleKind::Arm9 => Some(&self.main_module),
+            // Extern modules have no built object, delinks or relocations.
+            ModuleKind::Arm9i => None,
             ModuleKind::Autoload(autoload_kind) => self
                 .autoloads
                 .iter()
@@ -83,6 +89,7 @@ impl Config {
     ) -> Option<&mut ConfigModule> {
         match module_kind {
             ModuleKind::Arm9 => Some(&mut self.main_module),
+            ModuleKind::Arm9i => None,
             ModuleKind::Autoload(autoload_kind) => self
                 .autoloads
                 .iter_mut()
@@ -149,6 +156,22 @@ impl Config {
         Ok(rom)
     }
 
+    /// Iterates the extern modules: those dsd only knows the symbols of. They are not part of
+    /// [`Self::iter_modules`], which yields the modules that get disassembled, delinked and built.
+    pub fn iter_extern_modules(&self) -> impl Iterator<Item = (ModuleKind, &ConfigExternModule)> {
+        self.arm9i.iter().map(|arm9i| (ModuleKind::Arm9i, arm9i))
+    }
+
+    pub fn get_extern_module_by_kind(
+        &self,
+        module_kind: ModuleKind,
+    ) -> Option<&ConfigExternModule> {
+        match module_kind {
+            ModuleKind::Arm9i => self.arm9i.as_ref(),
+            _ => None,
+        }
+    }
+
     pub fn iter_modules(&self) -> impl Iterator<Item = (ModuleKind, &ConfigModule)> {
         std::iter::once((ModuleKind::Arm9, &self.main_module))
             .chain(self.autoloads.iter().map(|a| (ModuleKind::Autoload(a.kind), &a.module)))
@@ -170,6 +193,34 @@ pub struct ConfigModule {
     pub symbols: PathBuf,
     /// Path to relocs file
     pub relocations: PathBuf,
+}
+
+/// A module that dsd does not build. Only its symbols are known, so that relocations from built
+/// modules can name a destination inside it instead of emitting a bare address. `dsd lcf` gives
+/// those symbols to the linker as absolute addresses.
+///
+/// This is what the DSi-exclusive ARM9i program is modelled as: it is a separate binary in the ROM,
+/// loaded by the DSi boot ROM rather than by anything dsd links, and ARM9 main calls into it.
+#[derive(Serialize, Deserialize)]
+pub struct ConfigExternModule {
+    /// Name of module.
+    pub name: String,
+    /// Address the module is loaded at.
+    pub base_address: u32,
+    /// Size of the module in bytes. Symbols outside this range are rejected.
+    pub size: u32,
+    /// Path to symbols file.
+    pub symbols: PathBuf,
+}
+
+impl ConfigExternModule {
+    pub fn end_address(&self) -> u32 {
+        self.base_address + self.size
+    }
+
+    pub fn contains(&self, address: u32) -> bool {
+        (self.base_address..self.end_address()).contains(&address)
+    }
 }
 
 #[derive(Serialize, Deserialize)]

@@ -7,7 +7,7 @@ use std::{
 };
 
 use ds_rom::{
-    crypto::dsprot::{self, DsProtDecryptOptions, DsProtDecryptResult},
+    crypto::dsprot::{self, DsProtDecryptOptions, DsProtDecryptResult, DsProtRelocation},
     rom::{
         Arm9, Arm9DsProtInfoError, Autoload, Overlay, OverlayDsProtError,
         raw::{AutoloadKind, RawBuildInfoError},
@@ -59,6 +59,10 @@ pub struct Module {
     pub default_sinit_prefix: String,
     sections: Sections,
     signed: bool,
+    /// DS Protect relocations whose destination is outside this module's address space. They can
+    /// only be resolved once every module has been analyzed, see
+    /// [`Self::pending_dsprot_relocations`].
+    pending_dsprot_relocations: Vec<DsProtRelocation>,
 }
 
 #[derive(Debug, Snafu)]
@@ -112,10 +116,6 @@ pub enum ModuleError {
     OverlayDsProt { source: OverlayDsProtError },
     #[snafu(transparent)]
     Relocations { source: RelocationsError },
-    #[snafu(display(
-        "The DS Protect relocation from {from:#010x} points to {to:#010x} which is outside of this module's address space:\n{backtrace}"
-    ))]
-    InvalidDsProtReloc { from: u32, to: u32, backtrace: Backtrace },
 }
 
 pub const ENTRY_FN_SYMBOL_NAME: &str = "Entry";
@@ -170,6 +170,7 @@ impl Module {
             default_sinit_prefix,
             sections,
             signed,
+            pending_dsprot_relocations: vec![],
         })
     }
 
@@ -200,6 +201,7 @@ impl Module {
             default_sinit_prefix: "__sinit_".to_string(),
             sections,
             signed: false,
+            pending_dsprot_relocations: vec![],
         })
     }
 
@@ -238,12 +240,13 @@ impl Module {
             default_sinit_prefix: "__sinit_".to_string(),
             sections: Sections::new(),
             signed: false,
+            pending_dsprot_relocations: vec![],
         };
         let symbol_map = symbol_maps.get_mut(module.kind);
 
         module.find_sections_arm9(
             symbol_map,
-            &ctor_range,
+            ctor_range.as_ref(),
             exception_data,
             &arm9,
             &main_func,
@@ -256,11 +259,14 @@ impl Module {
         module.find_data_from_pools(
             symbol_map,
             options,
-            Some(BTreeMap::from([
+            ctor_range.as_ref().map(|ctor_range| {
                 // Empty .ctor sections won't be detected by relocation analysis, so instead
                 // override any pointer to .ctor to a link-time constant relocation
-                (ctor_range.start, RelocationKind::LinkTimeConst(LinkTimeConst::Arm9CtorStart)),
-            ])),
+                BTreeMap::from([(
+                    ctor_range.start,
+                    RelocationKind::LinkTimeConst(LinkTimeConst::Arm9CtorStart),
+                )])
+            }),
         )?;
         module.find_data_from_sections(symbol_map, options)?;
 
@@ -299,6 +305,7 @@ impl Module {
             default_sinit_prefix: format!("__sinit_ov{id:03}_"),
             sections,
             signed,
+            pending_dsprot_relocations: vec![],
         })
     }
 
@@ -332,6 +339,7 @@ impl Module {
             default_sinit_prefix: format!("__sinit_ov{:03}_", overlay.id()),
             sections: Sections::new(),
             signed: overlay.originally_signed(),
+            pending_dsprot_relocations: vec![],
         };
         let symbol_map = symbol_maps.get_mut(module.kind);
 
@@ -379,6 +387,7 @@ impl Module {
             default_sinit_prefix: "__sinit_".to_string(),
             sections,
             signed: false,
+            pending_dsprot_relocations: vec![],
         })
     }
 
@@ -399,6 +408,7 @@ impl Module {
             default_sinit_prefix: "__sinit_".to_string(),
             sections: Sections::new(),
             signed: false,
+            pending_dsprot_relocations: vec![],
         };
         let symbol_map = symbol_maps.get_mut(module.kind);
 
@@ -426,6 +436,7 @@ impl Module {
             default_sinit_prefix: "__sinit_".to_string(),
             sections: Sections::new(),
             signed: false,
+            pending_dsprot_relocations: vec![],
         };
         let symbol_map = symbol_maps.get_mut(module.kind);
 
@@ -455,6 +466,7 @@ impl Module {
             default_sinit_prefix: "__sinit_".to_string(),
             sections: Sections::new(),
             signed: false,
+            pending_dsprot_relocations: vec![],
         };
         let symbol_map = symbol_maps.get_mut(module.kind);
 
@@ -792,7 +804,7 @@ impl Module {
     fn find_sections_arm9(
         &mut self,
         symbol_map: &mut SymbolMap,
-        ctor: &CtorRange,
+        ctor: Option<&CtorRange>,
         exception_data: Option<ExceptionData>,
         arm9: &Arm9,
         main_func: &MainFunction,
@@ -806,23 +818,28 @@ impl Module {
             dsprot_result.map(|r| r.encrypted_ranges.as_slice()).unwrap_or(&[]);
 
         // .ctor and .init
-        let (read_only_end, rodata_start) = if let Some(init_functions) =
-            self.add_ctor_section(ctor, symbol_map)?
-        {
-            if let Some(init_range) = self.add_init_section(symbol_map, AddInitSectionOptions {
-                ctor,
-                init_functions,
-                continuous: false,
-                overriden_function_sizes,
-                dsprot_encrypted_functions,
-                dsprot_encrypted_ranges,
-            })? {
-                (init_range.0, Some(init_range.1))
+        let (read_only_end, rodata_start) = if let Some(ctor) = ctor {
+            if let Some(init_functions) = self.add_ctor_section(ctor, symbol_map)? {
+                if let Some(init_range) =
+                    self.add_init_section(symbol_map, AddInitSectionOptions {
+                        ctor,
+                        init_functions,
+                        continuous: false,
+                        overriden_function_sizes,
+                        dsprot_encrypted_functions,
+                        dsprot_encrypted_ranges,
+                    })?
+                {
+                    (init_range.0, Some(init_range.1))
+                } else {
+                    (ctor.start, None)
+                }
             } else {
                 (ctor.start, None)
             }
         } else {
-            (ctor.start, None)
+            // Games without a .ctor section have read-only data all the way to the end of the module's code.
+            (self.base_address + self.code.len() as u32, None)
         };
 
         // Secure area functions (software interrupts)
@@ -996,12 +1013,15 @@ impl Module {
         };
 
         // .rodata
+        let code_end = self.base_address + self.code.len() as u32;
         let rodata_start = rodata_start.unwrap_or(text_exceptix_end);
-        self.add_rodata_section(rodata_start, ctor.start)?;
+        // Without a .ctor section there is nothing marking where read-only data ends and writable data begins, so all of it
+        // goes in .rodata and .data comes out empty.
+        self.add_rodata_section(rodata_start, ctor.map_or(code_end, |ctor| ctor.start))?;
 
         // .data and .bss
-        let data_start = ctor.end.next_multiple_of(32);
-        let data_end = self.base_address + self.code.len() as u32;
+        let data_start = ctor.map_or(code_end, |ctor| ctor.end).next_multiple_of(32);
+        let data_end = code_end;
         self.add_data_section(data_start, data_end)?;
         let bss_start = data_end.next_multiple_of(32);
         self.add_bss_section(bss_start)?;
@@ -1304,15 +1324,19 @@ impl Module {
         options: &AnalysisOptions,
     ) -> Result<(), ModuleError> {
         if let Some(bss_variable) = dsprot_result.bss_variable {
-            if symbol_map.by_address(bss_variable)?.is_some() {
+            // Every module with DS Protect has its own BSS variable, and they all get the same
+            // name. The scope must therefore be local, or the linker sees one definition per
+            // module and fails with a multiply-defined symbol.
+            if let Some((symbol_id, _)) = symbol_map.by_address(bss_variable)? {
                 symbol_map.rename_by_address(bss_variable, DSPROT_BSS_SYMBOL_NAME)?;
+                symbol_map.get_mut(symbol_id).unwrap().scope = SymbolScope::Local;
             } else {
                 symbol_map.add(Symbol {
                     name: DSPROT_BSS_SYMBOL_NAME.to_string(),
                     kind: SymbolKind::Bss(SymBss { size: None }),
                     addr: bss_variable,
                     ambiguous: false,
-                    scope: SymbolScope::Global,
+                    scope: SymbolScope::Local,
                     skip: false,
                     comments: Comments::new(),
                 });
@@ -1338,14 +1362,19 @@ impl Module {
             );
 
             // Add relocation and destination symbol
-            let (_, section) =
-                self.sections.get_by_contained_address(relocation.to_address).ok_or_else(|| {
-                    InvalidDsProtRelocSnafu {
-                        from: relocation.from_address,
-                        to: relocation.to_address,
-                    }
-                    .build()
-                })?;
+            let Some((_, section)) = self.sections.get_by_contained_address(relocation.to_address)
+            else {
+                // DS Protect can also relocate pointers to other modules, which can only be
+                // resolved once every module has been analyzed.
+                log::debug!(
+                    "Deferring DS Protect relocation from {:#010x} in {} to {:#010x} as it points outside this module",
+                    relocation.from_address,
+                    self.kind,
+                    relocation.to_address
+                );
+                self.pending_dsprot_relocations.push(relocation);
+                continue;
+            };
             let symbol_name = format!("{}{:08x}", self.default_data_prefix, relocation.to_address);
             match section.kind() {
                 SectionKind::Code => {}
@@ -1378,6 +1407,13 @@ impl Module {
 
     pub fn relocations_mut(&mut self) -> &mut Relocations {
         &mut self.relocations
+    }
+
+    /// DS Protect relocations pointing outside this module's address space. Since overlays share
+    /// address space, the destination module can only be resolved by looking at every module in the
+    /// program, which is not possible while analyzing a single module.
+    pub fn pending_dsprot_relocations(&self) -> &[DsProtRelocation] {
+        &self.pending_dsprot_relocations
     }
 
     pub fn sections(&self) -> &Sections {
@@ -1424,6 +1460,9 @@ impl Module {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum ModuleKind {
     Arm9,
+    /// The DSi-exclusive ARM9i program. It is not built by dsd; it exists so that relocations from
+    /// built modules can name a symbol in its address space. See [`crate::config::config::ConfigExternModule`].
+    Arm9i,
     Overlay(u16),
     Autoload(AutoloadKind),
 }
@@ -1432,6 +1471,7 @@ impl Display for ModuleKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ModuleKind::Arm9 => write!(f, "ARM9 main"),
+            ModuleKind::Arm9i => write!(f, "ARM9i"),
             ModuleKind::Overlay(index) => write!(f, "overlay {index}"),
             ModuleKind::Autoload(kind) => match kind {
                 AutoloadKind::Itcm => write!(f, "ITCM"),

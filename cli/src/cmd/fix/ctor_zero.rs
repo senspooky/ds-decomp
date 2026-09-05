@@ -66,7 +66,7 @@ impl FixCtorZero {
                         log::error!("No .ctor section found in {kind}");
                         error = true;
                     }
-                    ModuleKind::Autoload(_) => {
+                    ModuleKind::Autoload(_) | ModuleKind::Arm9i => {
                         log::debug!("Skipping {kind} as it has no .ctor section");
                     }
                 }
@@ -157,7 +157,7 @@ impl FixCtorZero {
                 for from in relocs.get_by_to_address(symbol.addr).to_vec() {
                     let reloc = relocs.get_mut(from).unwrap();
                     match reloc.module() {
-                        RelocationModule::None => {}
+                        RelocationModule::None | RelocationModule::Arm9i => {}
                         RelocationModule::Overlay { id } => {
                             if let ModuleKind::Overlay(target_id) = *target_kind
                                 && *id == target_id

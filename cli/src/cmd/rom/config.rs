@@ -19,7 +19,7 @@ use ds_rom::{
     crypto::dsprot::{self, DsProtDecryptResult, DsProtFunction, DsProtState},
     rom::{
         Arm9BuildConfig, Arm9Offsets, OverlayConfig, OverlayTableConfig, Rom, RomConfig,
-        RomLoadOptions, raw::AutoloadKind,
+        RomConfigDsi, RomLoadOptions, raw::AutoloadKind,
     },
 };
 use object::{ObjectSection, ObjectSymbol};
@@ -119,6 +119,7 @@ impl ConfigRom {
             path_order,
             arm9_hmac_sha1_key,
             multiboot_signature,
+            dsi,
 
             // These files will be remade
             arm9_bin: _,
@@ -132,6 +133,29 @@ impl ConfigRom {
             alignment: _,
             padding: _,
         } = rom_paths;
+
+        // The DSi area is only present for DSi-enhanced and DSi-exclusive ROMs. Its files are
+        // reused as-is, so their paths need updating like the ARM7 ones.
+        if let Some(dsi) = dsi {
+            let RomConfigDsi {
+                // Update these paths
+                arm9i_bin,
+                arm9i_config,
+                arm7i_bin,
+                arm7i_config,
+                region_padding,
+
+                // Other non-path values
+                alignment: _,
+                padding: _,
+            } = dsi;
+
+            *arm9i_bin = Self::make_path(old.join(&*arm9i_bin), new);
+            *arm9i_config = Self::make_path(old.join(&*arm9i_config), new);
+            *arm7i_bin = Self::make_path(old.join(&*arm7i_bin), new);
+            *arm7i_config = Self::make_path(old.join(&*arm7i_config), new);
+            *region_padding = Self::make_path(old.join(&*region_padding), new);
+        }
 
         rom_paths.arm7_bin = Self::make_path(old.join(arm7_bin), new);
         rom_paths.arm7_config = Self::make_path(old.join(arm7_config), new);
@@ -381,6 +405,7 @@ impl ConfigRom {
             },
             encrypted: rom.arm9().originally_encrypted(),
             compressed: rom.arm9().originally_compressed(),
+            footer: rom.arm9().has_footer(),
             build_info: ds_rom::rom::BuildInfo {
                 bss_start: bss_range.start,
                 bss_end: bss_range.end,
@@ -526,4 +551,119 @@ fn create_dsprot_state(
         functions,
         relocations: Vec::new(), // not needed, relocations are already encoded at link-time
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A ROM config with a DSi area, trimmed down to what `update_relative_paths` looks at.
+    const DSI_ROM_CONFIG: &str = r"
+header: header.yaml
+header_logo: header_logo.png
+arm9_bin: arm9/arm9.bin
+arm9_config: arm9/arm9.yaml
+arm7_bin: arm7/arm7.bin
+arm7_config: arm7/arm7.yaml
+itcm:
+  bin: arm9/itcm.bin
+  config: arm9/itcm.yaml
+dtcm:
+  bin: arm9/dtcm.bin
+  config: arm9/dtcm.yaml
+arm9_overlays: arm9_overlays/overlays.yaml
+arm7_overlays: null
+banner: banner/banner.yaml
+files_dir: files/
+path_order: path_order.txt
+arm9_hmac_sha1_key: arm9/hmac_sha1_key.bin
+multiboot_signature: null
+dsi:
+  arm9i_bin: dsi/arm9i.bin
+  arm9i_config: dsi/arm9i.yaml
+  arm7i_bin: dsi/arm7i.bin
+  arm7i_config: dsi/arm7i.yaml
+  region_padding: dsi/region_padding.bin
+  alignment:
+    digest_block_hashtable: 512
+    rom_size_ds: 512
+    arm7i: 4096
+  padding:
+    digest_sector_hashtable: 255
+    digest_block_hashtable: 255
+    rom_size_ds: 255
+    dsi_region: 255
+    arm7i: 255
+    rom_size_dsi: 255
+alignment:
+  arm9: 512
+  arm9_overlay_table: 512
+  arm9_overlay: 512
+  arm7: 512
+  arm7_overlay_table: 512
+  arm7_overlay: 4
+  file_name_table: 512
+  file_allocation_table: 512
+  banner: 512
+  file_image_block: 512
+  file: 512
+padding:
+  arm9: 0
+  arm9_overlay_table: 255
+  arm9_overlays: 255
+  arm7: 255
+  arm7_overlay_table: 255
+  arm7_overlays: 255
+  fnt: 255
+  fat: 255
+  banner: 255
+  file_image: 255
+  rom: 255
+";
+
+    /// The DSi area files are reused rather than remade, so relocating a ROM config has to move
+    /// their paths along with the ARM7 ones.
+    #[test]
+    fn updates_dsi_relative_paths() {
+        let mut rom_config: RomConfig = serde_saphyr::from_str(DSI_ROM_CONFIG).unwrap();
+
+        ConfigRom::update_relative_paths(
+            &mut rom_config,
+            Path::new("rom/extract"),
+            Path::new("rom/config"),
+        );
+
+        // The ARM7 program is reused the same way, so it pins down what the DSi paths should look
+        // like.
+        assert_eq!(rom_config.arm7_bin, PathBuf::from("../extract/arm7/arm7.bin"));
+
+        let dsi = rom_config.dsi.as_ref().unwrap();
+        assert_eq!(dsi.arm9i_bin, PathBuf::from("../extract/dsi/arm9i.bin"));
+        assert_eq!(dsi.arm9i_config, PathBuf::from("../extract/dsi/arm9i.yaml"));
+        assert_eq!(dsi.arm7i_bin, PathBuf::from("../extract/dsi/arm7i.bin"));
+        assert_eq!(dsi.arm7i_config, PathBuf::from("../extract/dsi/arm7i.yaml"));
+        assert_eq!(dsi.region_padding, PathBuf::from("../extract/dsi/region_padding.bin"));
+    }
+
+    /// DS-only ROMs have no DSi area, and must not gain one.
+    #[test]
+    fn leaves_ds_only_config_without_dsi_area() {
+        let yaml = DSI_ROM_CONFIG
+            .lines()
+            .take_while(|line| *line != "dsi:")
+            .chain(DSI_ROM_CONFIG.lines().skip_while(|line| *line != "alignment:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut rom_config: RomConfig = serde_saphyr::from_str(&yaml).unwrap();
+        assert!(rom_config.dsi.is_none());
+
+        ConfigRom::update_relative_paths(
+            &mut rom_config,
+            Path::new("rom/extract"),
+            Path::new("rom/config"),
+        );
+
+        assert!(rom_config.dsi.is_none());
+        assert_eq!(rom_config.arm7_bin, PathBuf::from("../extract/arm7/arm7.bin"));
+    }
 }

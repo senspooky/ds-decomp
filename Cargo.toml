@@ -2,6 +2,11 @@
 members = ["cli", "lib"]
 resolver = "2"
 
+# Temporary, until the DSi-enhanced ROM support this needs is released in ds-rom.
+# Expects a checkout of https://github.com/AetiasHax/ds-rom next to this repository.
+[patch.crates-io]
+ds-rom = { path = "../ds-rom/lib" }
+
 [profile.release]
 lto = true
 

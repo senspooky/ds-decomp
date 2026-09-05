@@ -148,6 +148,8 @@ impl Init {
             || rom.arm9_overlays().iter().any(|o| o.dsprot_state().is_present());
 
         let config = Config {
+            // `dsd init` never creates extern modules; they are added to an existing project.
+            arm9i: None,
             rom_config: Self::make_path(&self.rom_config, &arm9_output_path)?,
             build_path: Self::make_path(&self.build_path, &arm9_output_path)?,
             delinks_path: Self::make_path(self.build_path.join("delinks"), &arm9_output_path)?,

@@ -8,7 +8,11 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use ds_decomp::config::{
-    config::Config, delinks::Delinks, link_time_const::LinkTimeConst, module::ModuleKind,
+    config::Config,
+    delinks::Delinks,
+    link_time_const::LinkTimeConst,
+    module::ModuleKind,
+    symbol::{InstructionMode, SymbolKind, SymbolMaps},
 };
 use ds_rom::rom::{Autoload, Rom, raw::AutoloadKind};
 use serde::Serialize;
@@ -117,7 +121,9 @@ impl Lcf {
         let mut tt = TinyTemplate::new();
         tt.add_template("arm9", ARM9_LCF_TEMPLATE)?;
 
-        let variables = Self::generate_lcf_variables(&config);
+        let symbol_maps = SymbolMaps::from_config(config_dir, &config)?;
+        let mut variables = Self::generate_lcf_variables(&config);
+        variables.extend(Self::extern_module_variables(&config, &symbol_maps)?);
         let arm9_context = Arm9LcfContext {
             modules: link_modules.modules,
             overlays: config
@@ -155,6 +161,46 @@ impl Lcf {
                 Some(LcfVariable::new(var.to_string(), value))
             })
             .collect()
+    }
+
+    /// Extern modules are not linked, so nothing defines their symbols. Emit each one as an
+    /// absolute address in the linker script instead, which is how a relocation from a built
+    /// module reaches into an address space dsd does not build.
+    fn extern_module_variables(
+        config: &Config,
+        symbol_maps: &SymbolMaps,
+    ) -> Result<Vec<LcfVariable>> {
+        let mut variables = vec![];
+        for (module_kind, extern_module) in config.iter_extern_modules() {
+            let Some(symbol_map) = symbol_maps.get(module_kind) else {
+                bail!("Extern module {module_kind} has no symbol map");
+            };
+            for symbol in symbol_map.iter() {
+                if symbol.scope.is_local() {
+                    // A local symbol cannot be referenced from another module, so the linker has
+                    // no use for it.
+                    continue;
+                }
+                if !extern_module.contains(symbol.addr) {
+                    bail!(
+                        "Symbol {} at {:#010x} is outside extern module {module_kind} ({:#010x}..{:#010x})",
+                        symbol.name,
+                        symbol.addr,
+                        extern_module.base_address,
+                        extern_module.end_address(),
+                    );
+                }
+                // A pointer to a Thumb function carries the interworking bit. The linker ignores
+                // it when encoding a branch, so setting it is only right and never harmful.
+                let thumb = matches!(
+                    &symbol.kind,
+                    SymbolKind::Function(function) if function.mode == InstructionMode::Thumb
+                );
+                let value = symbol.addr | u32::from(thumb);
+                variables.push(LcfVariable::new(symbol.name.clone(), format!("{value:#010x}")));
+            }
+        }
+        Ok(variables)
     }
 
     fn write_arm9_lcf(context: &Arm9LcfContext, tt: &TinyTemplate, lcf_path: &Path) -> Result<()> {
@@ -205,6 +251,9 @@ impl Lcf {
                 }
             },
             ModuleKind::Overlay(overlay_id) => format!("overlay_{overlay_id:03}.lcf"),
+            ModuleKind::Arm9i => {
+                unreachable!("extern module {kind} is not linked and has no linker script")
+            }
         }
     }
 
@@ -259,6 +308,7 @@ impl LcfModule {
     ) -> Result<Self> {
         let module_config = match kind {
             ModuleKind::Arm9 => &config.main_module,
+            ModuleKind::Arm9i => bail!("Extern module {kind} is not linked"),
             ModuleKind::Autoload(autoload) => {
                 &config.autoloads.iter().find(|a| a.kind == autoload).unwrap().module
             }
@@ -277,6 +327,7 @@ impl LcfModule {
                 AutoloadKind::Unknown(autoload_index) => format!("AUTOLOAD_{autoload_index}"),
             },
             ModuleKind::Overlay(overlay_id) => format!("OV{overlay_id:03}"),
+            ModuleKind::Arm9i => bail!("Extern module {kind} is not linked"),
         };
         let link_section = format!(".{}", module_name.to_lowercase());
 

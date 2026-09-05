@@ -7,6 +7,7 @@ use ds_decomp::{
         Comments,
         module::ModuleKind,
         relocations::{RelocationKind, Relocations},
+        section::SectionKind,
         symbol::{
             InstructionMode, SymData, SymFunction, SymLabel, Symbol, SymbolKind, SymbolMap,
             SymbolMaps, SymbolScope,
@@ -112,7 +113,7 @@ impl SymbolMapsExt for SymbolMaps {
 pub enum SymbolMapContainsError {}
 
 pub trait SymbolExt {
-    fn mapping_symbol_name(&self) -> Option<&str>;
+    fn mapping_symbol_name(&self, section_kind: SectionKind) -> Option<&str>;
 
     fn get_obj_symbol_scope(&self) -> object::SymbolScope;
     fn get_obj_symbol_flags(
@@ -121,9 +122,18 @@ pub trait SymbolExt {
 }
 
 impl SymbolExt for Symbol {
-    fn mapping_symbol_name(&self) -> Option<&str> {
+    fn mapping_symbol_name(&self, section_kind: SectionKind) -> Option<&str> {
         match self.kind {
             SymbolKind::Undefined => None,
+            // A mapping symbol claims everything up to the next one, so an unknown function - which
+            // has no size - would claim the data after it as code. In a data section that makes the
+            // linker generate interworking veneers for pointers to ARM functions, and those veneers
+            // are appended to the section, displacing every section after it.
+            SymbolKind::Function(SymFunction { unknown: true, size: 0, .. })
+                if section_kind != SectionKind::Code =>
+            {
+                Some("$d")
+            }
             SymbolKind::Function(SymFunction { mode, .. })
             | SymbolKind::Label(SymLabel { mode, .. }) => match mode {
                 InstructionMode::Arm => Some("$a"),
@@ -243,7 +253,9 @@ impl SymDataExt for SymData {
                 writeln!(w)?;
             }
 
-            offset += 16;
+            // A relocated word can take the column past 16, so advance by the number of bytes
+            // that were actually written instead of the nominal line length.
+            offset += column;
         }
 
         Ok(())
@@ -260,6 +272,13 @@ pub struct SymbolLookup<'a> {
 }
 
 impl SymbolLookup<'_> {
+    /// Whether the word at `address` is the target of a relocation which applies to data, and
+    /// therefore cannot be an instruction.
+    pub fn has_data_relocation(&self, address: u32) -> bool {
+        let Some(relocations) = self.relocations else { return false };
+        relocations.get(address).is_some_and(|relocation| relocation.kind() == RelocationKind::Load)
+    }
+
     pub fn write_symbol<W: io::Write>(
         &self,
         w: &mut W,
@@ -411,5 +430,98 @@ impl LookupSymbol for SymbolLookup<'_> {
         let external_symbol_map = self.symbol_maps.get(module_kind).unwrap();
 
         external_symbol_map.first_at_address(destination).map(|(_, symbol)| symbol.name.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ds_decomp::config::{
+        module::ModuleKind,
+        relocations::Relocations,
+        symbol::{SymData, Symbol, SymbolMaps},
+    };
+
+    use super::{SymDataExt, SymbolLookup};
+
+    /// A data symbol whose address is not 4-aligned puts every relocated word it contains at
+    /// column `16 - addr % 4`, so the word runs past the nominal 16-byte line. The cursor has to
+    /// follow the line it actually wrote, or the word's trailing bytes are emitted a second time
+    /// at the start of the next line.
+    #[test]
+    fn misaligned_symbol_emits_each_byte_once() {
+        const POINTER: u32 = 0x02000100;
+
+        for misalignment in 1..=3u32 {
+            let addr = 0x02000000 + misalignment;
+            let pointer_offset = (16 - misalignment) as usize;
+
+            let mut bytes = vec![0xeeu8; pointer_offset + 8];
+            bytes[pointer_offset..pointer_offset + 4].copy_from_slice(&POINTER.to_le_bytes());
+
+            let mut symbol_maps = SymbolMaps::new();
+            symbol_maps
+                .get_mut(ModuleKind::Arm9)
+                .add_data(Some("data_target".to_string()), POINTER, SymData::Any)
+                .unwrap();
+
+            let relocations = Relocations::new();
+            let symbol_map = symbol_maps.get(ModuleKind::Arm9).unwrap();
+            let lookup = SymbolLookup {
+                module_kind: ModuleKind::Arm9,
+                symbol_map,
+                symbol_maps: &symbol_maps,
+                relocations: Some(&relocations),
+            };
+
+            let symbol = Symbol::new_data("data_source".to_string(), addr, SymData::Any, false);
+
+            let mut out = vec![];
+            SymData::Any.write_assembly(&mut out, &symbol, &bytes, &lookup).unwrap();
+            let out = String::from_utf8(out).unwrap();
+
+            let filler = |count: usize| (0..count).map(|_| "0xee").collect::<Vec<_>>().join(", ");
+            let expected = format!(
+                "    .byte {}\n    .word data_target\n    .byte {}\n",
+                filler(pointer_offset),
+                filler(4)
+            );
+            assert_eq!(out, expected, "misalignment {misalignment}");
+        }
+    }
+
+    /// The same loop with a 4-aligned symbol never exceeds a 16-byte line, and must keep working.
+    #[test]
+    fn aligned_symbol_emits_each_byte_once() {
+        const POINTER: u32 = 0x02000100;
+
+        let addr = 0x02000000;
+        let mut bytes = vec![0xeeu8; 24];
+        bytes[12..16].copy_from_slice(&POINTER.to_le_bytes());
+
+        let mut symbol_maps = SymbolMaps::new();
+        symbol_maps
+            .get_mut(ModuleKind::Arm9)
+            .add_data(Some("data_target".to_string()), POINTER, SymData::Any)
+            .unwrap();
+
+        let relocations = Relocations::new();
+        let symbol_map = symbol_maps.get(ModuleKind::Arm9).unwrap();
+        let lookup = SymbolLookup {
+            module_kind: ModuleKind::Arm9,
+            symbol_map,
+            symbol_maps: &symbol_maps,
+            relocations: Some(&relocations),
+        };
+
+        let symbol = Symbol::new_data("data_source".to_string(), addr, SymData::Any, false);
+
+        let mut out = vec![];
+        SymData::Any.write_assembly(&mut out, &symbol, &bytes, &lookup).unwrap();
+        let out = String::from_utf8(out).unwrap();
+
+        let filler = |count: usize| (0..count).map(|_| "0xee").collect::<Vec<_>>().join(", ");
+        let expected =
+            format!("    .byte {}\n    .word data_target\n    .byte {}\n", filler(12), filler(8));
+        assert_eq!(out, expected);
     }
 }
